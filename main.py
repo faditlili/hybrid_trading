@@ -140,9 +140,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Real-time market scanning via Binance API active.\n"
         "Risk Mitigation Engine and Capital Preservation simulation fully engaged.\n\n"
         "Current Parameters:\n"
-        f"- Trading Status: {'Automated/Running' if bot_status['automated_trading'] else 'Paused'}\n"
-        f"- Target Boundary: >= {bot_status['confidence_threshold']}%\n"
-        "- Operational Base: High-Liquidity USDT Altcoin Streams"
+         f"- Trading Status: {'Automated/Running' if bot_status['automated_trading'] else 'Paused'}\n"
+         f"- Target Boundary: >= {bot_status['confidence_threshold']}%\n"
+         "- Operational Base: High-Liquidity USDT Altcoin Streams"
     )
     await update.message.reply_text(welcome_text, reply_markup=get_dashboard_keyboard())
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
