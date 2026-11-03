@@ -268,4 +268,6 @@ def main():
         loop.run_until_complete(session.__aexit__(None, None, None))
 
 if __name__ == "__main__":
-    main()
+   import asyncio
+asyncio.run(main())
+ 
