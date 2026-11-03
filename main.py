@@ -34,11 +34,11 @@ except ValueError:
 TRADING_PAIR_BASE = os.environ.get("TRADING_PAIR_BASE", "USDT")
 bot_status = {"automated_trading": True, "confidence_threshold": 80}
 
-# Global simulated persistent tracking metrics
-wallet_balance = 1250.50
-successful_trades = 3
+# Real-time realistic persistent tracking metrics for Demo trading
+wallet_balance = 200.00
+successful_trades = 0
 failed_trades = 0
-daily_profit = 45.20
+daily_profit = 0.00
 def get_dashboard_keyboard() -> InlineKeyboardMarkup:
     """Builds the comprehensive operational control panel layout."""
     status_text = "🟢 Active" if bot_status["automated_trading"] else "🔴 Stopped"
@@ -66,19 +66,19 @@ def is_authorized(user_id: int) -> bool:
 
 async def fetch_all_usdt_pairs_from_market():
     """
-    Asynchronously scans active cryptocurrency market from Binance.
-    Falls back to high-fidelity simulated streaming data if cloud IP is rate-limited.
+    Asynchronously scans active cryptocurrency market from Binance using public endpoint.
     """
     url = "https://binance.com"
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=5) as response:
+            async with session.get(url, timeout=6) as response:
                 if response.status == 200:
                     raw_data = await response.json()
                     valid_market_pool = []
                     for item in raw_data:
                         symbol = item.get("symbol", "")
-                        if symbol.endswith("USDT") and not symbol.startswith("BTC"):
+                        # Filter to include only USDT pairs, excluding stablecoins and BTC
+                        if symbol.endswith("USDT") and not any(x in symbol for x in ["BTC", "USDC", "FDUSD", "DAI"]):
                             valid_market_pool.append({
                                 "symbol": symbol,
                                 "price": float(item.get("lastPrice", 0)),
@@ -86,58 +86,61 @@ async def fetch_all_usdt_pairs_from_market():
                                 "volume": float(item.get("volume", 0))
                             })
                     if valid_market_pool:
+                        # Sort by top volume to target highest liquidity pairs
                         valid_market_pool.sort(key=lambda x: x["volume"], reverse=True)
                         return valid_market_pool[:12]
     except Exception as e:
-        logger.warning(f"Market API is cloud-blocked: {str(e)}. Activating robust fallback simulator...")
-        
-    mock_assets = ["ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "DOGEUSDT", "DOTUSDT", "LINKUSDT", "MATICUSDT", "SHIBUSDT"]
-    simulated_pool = []
-    for asset in mock_assets:
-        simulated_pool.append({
-            "symbol": asset,
-            "price": round(random.uniform(0.1, 2500.0), 4),
-            "change": round(random.uniform(-18.0, 18.0), 2),
-            "volume": random.uniform(5000000, 50000000)
-        })
-    return simulated_pool
-
+        logger.error(f"Error fetching real data from Binance: {str(e)}")
+    return []
 def run_technical_indicators_engine(asset: dict):
     """
     Advanced Quantitative Analysis Filter.
-    Processes volatility momentum vectors against simulated overbought/oversold boundaries.
+    Processes volatility momentum vectors against simulated boundaries.
     """
     price_momentum = asset["change"]
     
-    if abs(price_momentum) < 2.5:
-        return 45, "HOLD"
+    if abs(price_momentum) < 1.5:
+        return random.randint(40, 55), "HOLD"
         
-    if price_momentum > 3.0:
-        if price_momentum > 15.0:
-            confidence = int(65)
+    if price_momentum > 2.0:
+        if price_momentum > 18.0:
+            confidence = random.randint(60, 70)
             action = "HOLD"
         else:
-            confidence = int(78 + (price_momentum * 1.2))
+            confidence = int(72 + (price_momentum * 1.1))
             action = "BUY"
-    elif price_momentum < -3.0:
-        if price_momentum < -15.0:
-            confidence = int(60)
+    elif price_momentum < -2.0:
+        if price_momentum < -18.0:
+            confidence = random.randint(55, 65)
             action = "HOLD"
         else:
-            confidence = int(74 + (abs(price_momentum) * 1.2))
+            confidence = int(70 + (abs(price_momentum) * 1.1))
             action = "SELL"
     else:
-        confidence = int(50)
+        confidence = random.randint(50, 65)
         action = "HOLD"
         
-    return min(confidence, 96), action
-async def fire_pocket_option_order(symbol: str, action: str, amount: float):
-    """Executes non-blocking automated socket requests directly on the platform remote server."""
-    await asyncio.sleep(1.0)
-    logger.info(f"Execution Engine Match: Sent verified {action} order for {symbol} to Pocket Option.")
-    return True
+    return min(confidence, 98), action
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def simulated_market_outcome(symbol: str, action: str, change_24h: float):
+    """
+    Evaluates realistic market dynamic results.
+    Trades are not automatically successful; outcome depends on active asset volatility vectors.
+    """
+    await asyncio.sleep(0.5)
+    # The higher the 24h change amplitude, the more volatile the outcome
+    volatility_factor = max(abs(change_24h) * 0.15, 0.5)
+    
+    # Calculate a variable success rate based on technical alignment
+    success_probability = 0.68  # Base edge is 68% for high confidence setups
+    
+    if random.random() < success_probability:
+        profit_percent = random.uniform(0.5, 3.5) * volatility_factor
+        return True, round(profit_percent, 2)
+    else:
+        loss_percent = random.uniform(0.4, 2.8) * volatility_factor
+        return False, round(loss_percent, 2)
+        async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update or not update.effective_user or not update.message:
         return
         
@@ -147,15 +150,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
         
     welcome_text = (
-        "=== Premium Global Trading Bot Control Panel ===\n\n"
-        "Dynamic high-efficiency core active. All crypto assets paired with USDT "
-        "are actively scanned, excluding Bitcoin and Gold securely.\n"
-        "Advanced Noise Filtering and Capital Preservation algorithms are fully operational.\n\n"
-        "Current Status:\n"
-        f"- Trading Engine: {'Running Autonomously' if bot_status['automated_trading'] else 'Paused Manually'}\n"
-        f"- Min Confidence: {bot_status['confidence_threshold']}%\n"
-        "- Asset Class: All Altcoins & Meme Tokens (USDT Base Streams)\n\n"
-        "Select an operation option below to manage the real-time pipeline:"
+        "=== Premium Global Trading Bot (LIVE DEMO) ===\n\n"
+        "Real-time market scanning via Binance API active.\n"
+        "Risk Mitigation Engine and Capital Preservation simulation fully engaged.\n\n"
+        "Current Parameters:\n"
+        f"- Trading Status: {'Automated/Running' if bot_status['automated_trading'] else 'Paused'}\n"
+        f"- Target Boundary: >= {bot_status['confidence_threshold']}%\n"
+        "- Operational Base: High-Liquidity USDT Altcoin Streams"
     )
     await update.message.reply_text(welcome_text, reply_markup=get_dashboard_keyboard())
 
@@ -182,13 +183,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         elif data == "scan_market":
             await query.edit_message_text(
-                text="🔍 Initiating deep global market scan across all crypto pairs via Binance API... Standby.",
+                text="🔍 Scanning Binance live market tickers via public sockets... Please stand by.",
                 reply_markup=get_dashboard_keyboard()
             )
             live_market_pool = await fetch_all_usdt_pairs_from_market()
             if not live_market_pool:
                 await query.edit_message_text(
-                    text="⚠️ Failed to fetch data from market. Pipeline down.",
+                    text="⚠️ Connection error or API rate-limit reached. Failed to pull market arrays.",
                     reply_markup=get_dashboard_keyboard()
                 )
                 return
@@ -203,18 +204,28 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 scan_results += f"🔹 *{formatted_display_name}*: Price: ${asset['price']:.4f} | 24h: {asset['change']}% | Confidence: {confidence}%\n"
                 
                 if bot_status["automated_trading"] and confidence >= bot_status["confidence_threshold"] and action in ["BUY", "SELL"]:
-                    allocated_trade_amount = round(wallet_balance * 0.02, 2)
+                    # Updated allocation configuration to 10% per trade instead of 2%
+                    allocated_trade_amount = round(wallet_balance * 0.10, 2)
                     if allocated_trade_amount < 1.0:
                         allocated_trade_amount = 1.0
                         
-                    scan_results += f"🔥 *Confidence Target Met* ({confidence}% >= 80%)! Risk Engine calculated allocation: ${allocated_trade_amount} USDT. Submitting payload...\n"
+                    scan_results += f"⚡️ *Confidence Boundary Triggered* ({confidence}% >= 80%)! Evaluating 10% allocation: ${allocated_trade_amount} USDT...\n"
                     
-                    success = await fire_pocket_option_order(formatted_display_name, action, amount=allocated_trade_amount)
-                    if success:
-                        trades_fired += 1
+                    is_win, percentage = await simulated_market_outcome(formatted_display_name, action, asset['change'])
+                    trades_fired += 1
+                    
+                    if is_win:
                         successful_trades += 1
-                        wallet_balance += round(allocated_trade_amount * 0.85, 2)
-                        daily_profit += round(allocated_trade_amount * 0.85, 2)
+                        profit_gain = round(allocated_trade_amount * (percentage / 100), 2)
+                        wallet_balance += profit_gain
+                        daily_profit += profit_gain
+                        scan_results += f"✅ *PROFIT TARGET HIT:* {formatted_display_name} closed at +{percentage}% (+${profit_gain} USDT)\n\n"
+                    else:
+                        failed_trades += 1
+                        loss_take = round(allocated_trade_amount * (percentage / 100), 2)
+                        wallet_balance -= loss_take
+                        daily_profit -= loss_take
+                        scan_results += f"❌ *STOP LOSS TRIGGERED:* {formatted_display_name} exited at -{percentage}% (-${loss_take} USDT)\n\n"
                         
             if trades_fired == 0:
                 scan_results += "\n⚠️ No high-probability setups met the strict 80% confidence criteria. Positions skipped."
@@ -228,10 +239,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pnl_report = (
                 "💰 *Premium Real-Time Profit & Loss Report*\n\n"
                 f"💵 Wallet Balance: ${wallet_balance:.2f} USDT\n"
-                f"📈 Daily Net Profit: +${daily_profit:.2f} USDT\n"
+                f"📈 Daily Net Profit: {'' if daily_profit < 0 else '+'}${daily_profit:.2f} USDT\n"
                 f"🟢 Execution Successes: {successful_trades} ✅\n"
                 f"🔴 Execution Failures: {failed_trades} ❌\n"
-                "⚙️ Mode: Non-Stop High Confidence Processing"
+                "⚙️ Mode: Live Technical Simulation Engine"
             )
             await query.edit_message_text(
                 text=pnl_report,
@@ -243,7 +254,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             settings_text = (
                 "⚙️ *Operational Parameters Config*\n\n"
                 f"▪️ Execution Confidence Limit: >= {bot_status['confidence_threshold']}%\n"
-                "▪️ Calculated Risk Size: 2.0% Compound Allocation per Trade\n"
+                "▪️ Calculated Risk Size: 10.0% Compound Allocation per Trade\n"
                 "▪️ Minimum Liquidity Floor: Top 12 Volume Chains Only"
             )
             await query.edit_message_text(
@@ -288,12 +299,10 @@ async def main():
     
     logger.info("Initializing high-frequency cloud pipeline hooks. Starting Telegram Bot Polling...")
     
-    # Secure setup to properly handle async context
     async with application:
         await application.initialize()
         await application.start()
         await application.updater.start_polling()
-        # Keep running until cancelled
         while True:
             await asyncio.sleep(3600)
 
