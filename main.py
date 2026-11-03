@@ -141,7 +141,7 @@ async def simulated_market_outcome(symbol: str, action: str, change_24h: float):
         loss_percent = random.uniform(0.4, 2.8) * volatility_factor
         return False, round(loss_percent, 2)
         async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update or not update.effective_user or not update.message:
+    if not update...    or not update.effective_user or not update.message:
         return
         
     user_id = update.effective_user.id
