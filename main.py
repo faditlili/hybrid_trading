@@ -39,6 +39,8 @@ wallet_balance = 200.00
 successful_trades = 0
 failed_trades = 0
 daily_profit = 0.00
+
+
 def get_dashboard_keyboard() -> InlineKeyboardMarkup:
     """Builds the comprehensive operational control panel layout."""
     status_text = "🟢 Active" if bot_status["automated_trading"] else "🔴 Stopped"
@@ -90,6 +92,8 @@ async def fetch_all_usdt_pairs_from_market():
     except Exception as e:
         logger.error(f"Error fetching real data from Binance: {str(e)}")
     return []
+
+
 def run_technical_indicators_engine(asset: dict):
     """Advanced Quantitative Analysis Filter."""
     price_momentum = asset["change"]
@@ -113,8 +117,6 @@ def run_technical_indicators_engine(asset: dict):
         confidence = random.randint(50, 65)
         action = "HOLD"
     return min(confidence, 98), action
-
-
 async def simulated_market_outcome(symbol: str, action: str, change_24h: float):
     """Evaluates realistic market dynamic results."""
     await asyncio.sleep(0.5)
@@ -140,11 +142,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Real-time market scanning via Binance API active.\n"
         "Risk Mitigation Engine and Capital Preservation simulation fully engaged.\n\n"
         "Current Parameters:\n"
-         f"- Trading Status: {'Automated/Running' if bot_status['automated_trading'] else 'Paused'}\n"
-         f"- Target Boundary: >= {bot_status['confidence_threshold']}%\n"
-         "- Operational Base: High-Liquidity USDT Altcoin Streams"
+        f"- Trading Status: {'Automated/Running' if bot_status['automated_trading'] else 'Paused'}\n"
+        f"- Target Boundary: >= {bot_status['confidence_threshold']}%\n"
+        "- Operational Base: High-Liquidity USDT Altcoin Streams"
     )
     await update.message.reply_text(welcome_text, reply_markup=get_dashboard_keyboard())
+
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global wallet_balance, successful_trades, daily_profit, failed_trades
     query = update.callback_query
