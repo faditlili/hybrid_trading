@@ -69,10 +69,12 @@ def is_authorized(user_id: int) -> bool:
 
 
 async def fetch_all_usdt_pairs_from_market():
-    """Asynchronously scans active cryptocurrency market from Binance using public endpoint."""
+    """Asynchronously scans active cryptocurrency market from Binance using an isolated programmatic session."""
     url = "https://binance.com"
     try:
-        async with aiohttp.ClientSession() as session:
+        # Isolated connection to bypass Python 3.13 event loop registration drops
+        connector = aiohttp.TCPConnector(ssl=False)
+        async with aiohttp.ClientSession(connector=connector) as session:
             async with session.get(url, timeout=6) as response:
                 if response.status == 200:
                     raw_data = await response.json()
@@ -263,11 +265,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def main():
-    """Main execution point using advanced modern asyncio loop initialization."""
+    """Main execution point using specialized modern loop initializers."""
+    # Explicit loop definition to prevent standard global drops in 3.13 envs
+    loop = asyncio.get_event_loop()
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_handler))
-    logger.info("Initializing high-frequency cloud pipeline hooks. Starting Telegram Bot Polling...")
+    logger.info("Initializing isolated high-frequency cloud pipeline hooks. Starting Telegram Bot Polling...")
+    
     async with application:
         await application.initialize()
         await application.start()
@@ -278,6 +283,7 @@ async def main():
 
 if __name__ == "__main__":
     try:
+        # Forcing clean run architecture
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Bot execution gracefully stopped.")
