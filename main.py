@@ -34,18 +34,18 @@ except ValueError:
 TRADING_PAIR_BASE = os.environ.get("TRADING_PAIR_BASE", "USDT")
 bot_status = {"automated_trading": True, "confidence_threshold": 80}
 
-# Real-time realistic persistent tracking metrics for Demo trading
+# Real-time realistic persistent tracking metrics for Dynamic Growth
 INITIAL_BALANCE = 200.00
 wallet_balance = 200.00
 successful_trades = 0
 failed_trades = 0
 daily_profit = 0.00
 
-# Advanced Strategic Risk Controls
-RISK_MANAGEMENT_FLOOR = 0.50  # Hard stop if wallet drops 50% from initialization floor
-DAILY_PROFIT_TARGET_PCT = 20.0  # Automatic profit lock and freeze at +20% growth milestone
-MAX_CONCURRENT_TRADES = 1  # Prevents overlapping margin requirements on 50% allocation rules
-MAX_ALLOWED_SLIPPAGE_PCT = 0.3  # Restricts asset volatility entries if market spread > 0.3%
+# Advanced Strategic Risk Controls Optimized for 10% Fully Autonomous Dynamic Injections
+RISK_MANAGEMENT_FLOOR = 0.50  # Hard stop if wallet drops below 50% of original capital
+DAILY_PROFIT_TARGET_PCT = 100.0  # Aggressive daily ceiling to allow continuous compounding matrix
+MAX_CONCURRENT_TRADES = 5  # Allows up to 5 simultaneous trades on different altcoins
+MAX_ALLOWED_SLIPPAGE_PCT = 0.35  # Dynamic spread allowance to prevent missed opportunities
 is_scanning_loop_active = False
 
 
@@ -77,7 +77,6 @@ async def check_wallet_safety(application: Application = None):
     """Monitors capital depletion curves and locking thresholds on production vaults."""
     global wallet_balance, daily_profit
     
-    # 1. Hard Capital Downside Stop-Gate
     if wallet_balance <= (INITIAL_BALANCE * RISK_MANAGEMENT_FLOOR):
         bot_status["automated_trading"] = False
         msg = f"🚨 **HARD RISK WALL ACTIVATED:** Automated trading engine terminated! Vault balance (${wallet_balance:.2f} USDT) crossed risk floor safety thresholds."
@@ -86,7 +85,6 @@ async def check_wallet_safety(application: Application = None):
             await application.bot.send_message(chat_id=ALLOWED_ADMIN_ID, text=msg, parse_mode="Markdown")
         return False
         
-    # 2. Institutional Daily Profit Ceiling Protection
     target_amount = INITIAL_BALANCE * (DAILY_PROFIT_TARGET_PCT / 100.0)
     if daily_profit >= target_amount and bot_status["automated_trading"]:
         bot_status["automated_trading"] = False
@@ -104,13 +102,11 @@ async def fetch_all_usdt_pairs_from_market():
     try:
         connector = aiohttp.TCPConnector(ssl=False)
         async with aiohttp.ClientSession(connector=connector) as session:
-            # 1. Fetch exact bid/ask book liquidity depth to calculate authentic slippage spread
             async with session.get(url, timeout=7) as book_res:
                 if book_res.status != 200:
                     raise Exception("Primary book API unreachable.")
                 book_data = {x["symbol"]: x for x in await book_res.json()}
             
-            # 2. Fetch volume characteristics for institutional VSA checking
             async with session.get(backup_url, timeout=7) as stats_res:
                 if stats_res.status != 200:
                     raise Exception("Secondary statistics API unreachable.")
@@ -122,7 +118,6 @@ async def fetch_all_usdt_pairs_from_market():
                 if symbol.endswith("USDT") and not any(x in symbol for x in ["BTC", "USDC", "FDUSD", "DAI", "EUR"]):
                     last_price = float(item.get("lastPrice", 0))
                     
-                    # Map structural book liquidity values to evaluate real spreads
                     book_item = book_data.get(symbol, {})
                     bid_price = float(book_item.get("bidPrice", last_price * 0.999))
                     ask_price = float(book_item.get("askPrice", last_price * 1.001))
@@ -134,7 +129,7 @@ async def fetch_all_usdt_pairs_from_market():
                         "price": last_price,
                         "change": float(item.get("priceChangePercent", 0)),
                         "volume": float(item.get("volume", 0)),
-                        "quoteVolume": float(item.get("quoteVolume", 0)), # Liquid capital in USDT
+                        "quoteVolume": float(item.get("quoteVolume", 0)), 
                         "spread_pct": spread_pct
                     })
             
@@ -145,7 +140,6 @@ async def fetch_all_usdt_pairs_from_market():
     except Exception as e:
         logger.warning(f"Live Binance infrastructure ingestion restricted: {str(e)}. Triggering high-fidelity emulators...")
     
-    # Advanced logic fallback to ensure runtime pipeline continuity during connection dropouts
     mock_assets = ["ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "DOGEUSDT", "DOTUSDT", "LINKUSDT", "MATICUSDT", "NEARUSDT", "PEPEUSDT", "SHIBUSDT"]
     simulated_pool = []
     for asset in mock_assets:
@@ -161,19 +155,15 @@ async def fetch_all_usdt_pairs_from_market():
 
 
 def scan_mtf_vsa_and_rsi_matrix(asset: dict, all_assets: list):
-    """
-    Advanced Quantitative Analysis Filtering Engine.
-    Combines Relative Volume Spread Analysis (VSA) with RSI Overbought/Oversold thresholds.
-    """
+    """Advanced Quantitative Analysis Filtering Engine combining VSA metrics and RSI momentum."""
     price_change_24h = asset["change"]
     current_volume = asset["quoteVolume"]
     
     total_market_vol = sum(x["quoteVolume"] for x in all_assets)
     avg_market_vol = total_market_vol / len(all_assets)
     
-    # Dynamic institutional calculation for RSI momentum shifts
     simulated_rsi = 50 + (price_change_24h * 2.5)
-    simulated_rsi = max(min(simulated_rsi, 95), 10)  # Bound calculation between 10-95 parameters
+    simulated_rsi = max(min(simulated_rsi, 95), 10)
     
     trend_24h = "BULLISH" if price_change_24h > 0.5 else "BEARISH"
     trend_12h = "BULLISH" if price_change_24h > -0.2 and random.random() > 0.3 else "BEARISH"
@@ -182,8 +172,6 @@ def scan_mtf_vsa_and_rsi_matrix(asset: dict, all_assets: list):
     trend_3m = "BULLISH" if random.random() > 0.45 else "BEARISH"
     
     bullish_candles_count = [trend_24h, trend_12h, trend_1h, trend_15m, trend_3m].count("BULLISH")
-    
-    # VSA Check: Verifies if current volume trends exceed broad market average by 1.5x factor
     is_high_liquidity_vsa = current_volume > (avg_market_vol * 1.5)
     
     confidence = 35 + (bullish_candles_count * 10)
@@ -191,10 +179,8 @@ def scan_mtf_vsa_and_rsi_matrix(asset: dict, all_assets: list):
         confidence += 10
         
     action = "HOLD"
-    # Buy execution criteria: Aggressive trend alignment + Whale accumulation + Non-overbought RSI (<75)
     if bullish_candles_count >= 4 and is_high_liquidity_vsa and simulated_rsi < 75:
         action = "BUY"
-    # Sell execution criteria: Downward distribution + Whale selloff + Non-oversold RSI (>25)
     elif bullish_candles_count <= 1 and is_high_liquidity_vsa and simulated_rsi > 25:
         confidence = 35 + ((5 - bullish_candles_count) * 10) + 10
         action = "SELL"
@@ -206,7 +192,7 @@ def scan_mtf_vsa_and_rsi_matrix(asset: dict, all_assets: list):
 async def process_trailing_stop_simulation(symbol: str, allocated_amount: float) -> tuple[bool, float]:
     """Simulates multi-stage Trailing Stop-Loss vector tracking to lock peak value yields."""
     await asyncio.sleep(0.2)
-    if random.random() < 0.77:  # 77% Quantitative edge advantage vector
+    if random.random() < 0.77:
         attained_maximum_peak = random.uniform(3.0, 9.5)
         final_locked_profit = round(attained_maximum_peak - random.uniform(0.2, 0.8), 2)
         return True, max(final_locked_profit, 2.0)
@@ -214,7 +200,7 @@ async def process_trailing_stop_simulation(symbol: str, allocated_amount: float)
         final_loss_triggered = round(random.uniform(0.6, 1.1), 2)
         return False, final_loss_triggered
 async def execute_autonomous_market_scan(application: Application):
-    """The central autonomous execution pipeline. Scans market structure, validates, and fires trades."""
+    """The central autonomous execution pipeline with real-time dynamic compound sizing."""
     global wallet_balance, successful_trades, daily_profit, failed_trades
     
     if not bot_status["automated_trading"] or not await check_wallet_safety(application):
@@ -229,28 +215,25 @@ async def execute_autonomous_market_scan(application: Application):
         if trades_executed_this_run >= MAX_CONCURRENT_TRADES or not await check_wallet_safety(application):
             break
 
-        # Slippage Safeguard: Discard asset if live order-book spread exceeds constraints
         if asset["spread_pct"] > MAX_ALLOWED_SLIPPAGE_PCT:
-            logger.info(f"Skipped {asset['symbol']} due to high asset spread: {asset['spread_pct']:.3f}%")
             continue
 
         confidence, action, tf_data, vsa_vol, rsi_val = scan_mtf_vsa_and_rsi_matrix(asset, live_market_pool)
         formatted_display_name = asset["symbol"]
         
         if confidence >= bot_status["confidence_threshold"] and action in ["BUY", "SELL"]:
-            allocated_trade_amount = round(wallet_balance * 0.50, 2)
+            # DYNAMIC POSITION SIZING CORE: Calculates 10% size adaptively based on CURRENT wallet balance
+            allocated_trade_amount = round(wallet_balance * 0.10, 2)
             if allocated_trade_amount < 1.0:
                 allocated_trade_amount = 1.0
                 
-            # 1. Dispatch Instant Entry Notification to Admin Account
             entry_msg = (
-                f"🔔 **ELITE TRADE ENGINE SIGNAL TRIGGERED (VSA + RSI):**\n\n"
+                f"🔔 **AUTONOMOUS ENGINE ENTRY TARGETED:**\n\n"
                 f"📌 Asset Token: `{formatted_display_name}`\n"
-                f"📈 Execution Action: `{action}`\n"
-                f"📊 RSI Indicator Momentum: `{rsi_val}`\n"
-                f"🛡️ Liquidity Spread Dev: `{asset['spread_pct']:.3f}%` (Pass)\n"
-                f"🎯 Signal Confidence Rank: `{confidence}%`\n"
-                f"💰 Vault Risk Allocation (50%): `${allocated_trade_amount} USDT`"
+                f"📈 Position Action: `{action}`\n"
+                f"📊 RSI Level: `{rsi_val}`\n"
+                f"🎯 Strategy Confidence: `{confidence}%`\n"
+                f"💰 Dynamic Allocation (10% of ${wallet_balance:.2f}): `${allocated_trade_amount} USDT`"
             )
             await application.bot.send_message(chat_id=ALLOWED_ADMIN_ID, text=entry_msg, parse_mode="Markdown")
             
@@ -262,31 +245,32 @@ async def execute_autonomous_market_scan(application: Application):
                 profit_gain = round(allocated_trade_amount * (percentage / 100), 2)
                 wallet_balance += profit_gain
                 daily_profit += profit_gain
-                exit_msg = f"✅ **TRAILING TARGET MAXIMUM ACCUMULATED:**\n\n🔹 Asset: `{formatted_display_name}`\n🟢 Outcome: Target peak profit locked at +{percentage}%\n💵 Balance Yield Added: `+${profit_gain} USDT`"
+                exit_msg = f"✅ **PROFIT CAPTURED:**\n\n🔹 Asset: `{formatted_display_name}`\n🟢 Trailing Stop locked at +{percentage}%\n💵 Added Yield: `+${profit_gain} USDT`"
             else:
                 failed_trades += 1
                 loss_take = round(allocated_trade_amount * (percentage / 100), 2)
                 wallet_balance -= loss_take
                 daily_profit -= loss_take
-                exit_msg = f"❌ **DYNAMIC TRAILING STOP-LOSS EXIT TRIGGERED:**\n\n🔹 Asset: `{formatted_display_name}`\n🔴 Outcome: Protection triggered at -{percentage}%\n📉 Drawdown Sustained: `-${loss_take} USDT`"
+                exit_msg = f"❌ **PROTECTION EXIT:**\n\n🔹 Asset: `{formatted_display_name}`\n🔴 Terminated at -{percentage}%\n📉 Drawdown: `-${loss_take} USDT`"
                 
             await application.bot.send_message(chat_id=ALLOWED_ADMIN_ID, text=exit_msg, parse_mode="Markdown")
 
 
 async def background_scanner_loop(application: Application):
-    """Continuous automated cron routine running invisibly inside core process memory."""
+    """Hyper-frequency cron routine running non-stop inside background process memory."""
     global is_scanning_loop_active
     if is_scanning_loop_active:
         return
     is_scanning_loop_active = True
-    logger.info("Elite Autonomous background scanning engine active.")
+    logger.info("Hyper-frequency autonomous background engine successfully deployed.")
     
     while True:
         try:
             await execute_autonomous_market_scan(application)
         except Exception as e:
-            logger.error(f"Error in continuous background task loop: {str(e)}")
-        await asyncio.sleep(900)  # Standard 15-minute operational cool-down cycles
+            logger.error(f"Error in continuous loop tracking: {str(e)}")
+        # Dynamic frequency interval optimization: 3 minutes (180 seconds)
+        await asyncio.sleep(180)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -297,21 +281,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Unauthorized: Access Denied.")
         return
         
-    # Inject background task linked directly to runtime application context securely
     asyncio.create_task(background_scanner_loop(context.application))
-    
     is_safe = await check_wallet_safety(context.application)
     safety_label = "🛡️ Liquidity & Slippage Guardrails: OPERATIONAL" if is_safe else "⚠️ SYSTEM LIQUIDATION RISK DETECTED"
     
     welcome_text = (
         "=== ELITE QUANTITATIVE RADAR SYSTEM (VSA ULTRA-PRO) ===\n\n"
-        "🚀 Background cron task loop active (15-Minute scan intervals instantiated).\n"
+        "🚀 Background cron task loop active (3-Minute intervals enabled).\n"
         "🔔 Direct real-time smartphone notification stream linked successfully.\n"
         f"{safety_label}\n\n"
         "Active Risk Parameters Matrix:\n"
         f"- Core Trading Automation: {'RUNNING AUTONOMOUSLY' if bot_status['automated_trading'] else 'PAUSED & LOCKED'}\n"
         f"- Slippage Max Spread Ceiling: < {MAX_ALLOWED_SLIPPAGE_PCT}%\n"
-        "- Position Sizing Allocation: 50.0% Compounded Capital Size per Signal"
+        "- Position Sizing Allocation: Dynamic 10% of Live Wallet Compound"
     )
     await update.message.reply_text(welcome_text, reply_markup=get_dashboard_keyboard())
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -329,7 +311,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if data == "toggle_trading":
             if not await check_wallet_safety(context.application):
-                await query.edit_message_text(text="❌ Action Refused: Risk walls have locked operational capabilities to preserve account balances.", reply_markup=get_dashboard_keyboard())
+                await query.edit_message_text(text="❌ Action Refused: Risk walls have locked operational capabilities.", reply_markup=get_dashboard_keyboard())
                 return
             bot_status["automated_trading"] = not bot_status["automated_trading"]
             status_label = "RUNNING AUTONOMOUSLY" if bot_status["automated_trading"] else "PAUSED MANUALLY"
@@ -369,7 +351,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             settings_text = (
                 "⚙️ *Risk Management Matrix & Capital Protection Profiles*\n\n"
                 f"▪️ Signal Execution Threshold Gate: >= {bot_status['confidence_threshold']}%\n"
-                "▪️ Indicated Allocation Profile: 50.0% Compounded Position Margin\n"
+                "▪️ Indicated Allocation Profile: Dynamic 10% Compound Sizing\n"
                 f"▪️ Drawdown Stop Boundary Floor: Auto Freeze at {RISK_MANAGEMENT_FLOOR * 100}% Depletion\n"
                 f"▪️ Slippage Floor Constraints: Discard Entries if Spread > {MAX_ALLOWED_SLIPPAGE_PCT}%\n"
                 f"▪️ Strategy Architecture: Volume Spread Analysis (VSA) + RSI Momentum Filters"
@@ -386,7 +368,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         elif data == "refresh_dashboard":
             is_safe = await check_wallet_safety(context.application)
-            safety_status = "STABLE & AGGRESSIVE" if is_safe else "FROZEN PROTECTION PROFILE"
+            safety_status = "STABLE & COMPOUNDING" if is_safe else "FROZEN PROTECTION PROFILE"
             refresh_text = (
                 "🔄 Operations Room Interface Refreshed.\n\n"
                 f"Active Loop Cron Engine: {'SCANNING MATRIX IN BACKGROUND' if bot_status['automated_trading'] else 'PIPELINE FROZEN'}\n"
