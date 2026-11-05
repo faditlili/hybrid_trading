@@ -405,11 +405,12 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="amber", secondary_hue="slate"))
     ai_box = gr.TextArea(label="🤖 Llama-3-8B Network Cores - Collective Auditing Loop Live Dialogue Stream", value="", interactive=False, lines=4)
     log_area = gr.TextArea(label="Continuous Cloud Cron Ingestion Logs (VSA Matrix + RSI Levels)", value="", interactive=False, lines=6)
     
-    # 10-Second Auto Refresh Layout Node without processing locks
+        # Secure and compatible Auto Refresh Trigger Node for newer Gradio versions
     gradio_interface.load(
         fn=get_live_metrics_ui,
-        outputs=[balance_box, pnl_box, wins_box, loss_box, status_box, floating_box, ai_box, log_area],
-        every=10
+        outputs=[balance_box, pnl_box, wins_box, loss_box, status_box, floating_box, ai_box, log_area]
+    ).run_forever(every=10)
+
     )
 
 from contextlib import asynccontextmanager
