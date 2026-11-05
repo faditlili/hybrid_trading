@@ -91,8 +91,8 @@ def add_ai_dialogue(message: str):
 async def fetch_aggregated_crypto_news_feeds():
     """Asynchronously parses headlines securely from open official RSS aggregator channels."""
     feed_urls = [
-        "https://cointelegraph.com",
-        "https://coindesk.com"
+        "cointelegraph.com/rss",
+        "www.coindesk.com/arc/outboundfeeds/rss/"
     ]
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     aggregated_headlines = []
@@ -120,7 +120,7 @@ async def fetch_aggregated_crypto_news_feeds():
 # Model Agent 1: Qwen 2.5 7B (News Sentiment Classifier)
 async def model_agent_qwen_sentiment(headline: str) -> str:
     if not HF_TOKEN: return "NEUTRAL"
-    api_url = "https://huggingface.co"
+    api_url = "api-inference.huggingface.co/models/Qwen/Qwen2.5-7B-Instruct"
     headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
     prompt = f"<|im_start|>system\nClassify this crypto headline as EXACTLY one word: BULLISH, BEARISH, or NEUTRAL.<|im_end|>\n<|im_start|>user\nHeadline: {headline}<|im_end|>\n<|im_start|>assistant\n"
     try:
@@ -138,7 +138,7 @@ async def model_agent_qwen_sentiment(headline: str) -> str:
 # Model Agent 2: DeepSeek-R1 Distill 1.5B (Risk Management Auditor)
 async def model_agent_deepseek_auditor(headline: str) -> str:
     if not HF_TOKEN: return "NEUTRAL"
-    api_url = "https://huggingface.co"
+    api_url = "api-inference.huggingface.co/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
     headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
     prompt = f"<|im_start|>system\nYou are a financial risk officer. Is this title dangerous? Respond with EXACTLY one word: BULLISH, BEARISH, or NEUTRAL.<|im_end|>\n<|im_start|>user\nHeadline: {headline}<|im_end|>\n<|im_start|>assistant\n"
     try:
@@ -156,7 +156,8 @@ async def model_agent_deepseek_auditor(headline: str) -> str:
 # Model Agent 3: Meta Llama 3.1 8B (Technical Momentum Confirmer)
 async def model_agent_llama_technical(symbol: str, rsi: float, change: float) -> str:
     if not HF_TOKEN: return "NEUTRAL"
-    api_url = "https://huggingface.co"
+    api_url = "•api-inference.huggingface.co/models/meta-llama/Meta-Llama-3.1-8B-Instruct
+"
     headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
     prompt = (
         f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n"
@@ -177,7 +178,7 @@ async def model_agent_llama_technical(symbol: str, rsi: float, change: float) ->
     return "HOLD"
 # --- Real-Market Price Ticker Ingestion & Metric Calculations ---
 async def execute_bitcoin_macro_safety_check():
-    api_url = "https://binance.com"
+    api_url = "api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT"
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(api_url, timeout=5) as response:
@@ -191,7 +192,7 @@ async def execute_bitcoin_macro_safety_check():
     return "BULLISH_REGIME", 0.0
 
 async def fetch_all_usdt_pairs_from_market():
-    api_url = "https://binance.com"
+    api_url = "api.binance.com/api/v3/ticker/24hr"
     target_assets = ["ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "DOGEUSDT", "LINKUSDT", "NEARUSDT", "PEPEUSDT"]
     live_pool = []
     try:
