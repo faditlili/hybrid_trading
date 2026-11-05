@@ -401,16 +401,17 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="amber", secondary_hue="slate"))
         wins_box = gr.Textbox(label="Successful Targets", value="0", interactive=False)
         loss_box = gr.Textbox(label="Protection Terminations", value="0", interactive=False)
         
-    floating_box = gr.Textbox(label="Active Risk Allocation Trackers", value="📊 Floating Allocation Trackers: [ None ]", interactive=False)
+        floating_box = gr.Textbox(label="Active Risk Allocation Trackers", value="📊 Floating Allocation Trackers: [ None ]", interactive=False)
     ai_box = gr.TextArea(label="🤖 Llama-3-8B Network Cores - Collective Auditing Loop Live Dialogue Stream", value="", interactive=False, lines=4)
     log_area = gr.TextArea(label="Continuous Cloud Cron Ingestion Logs (VSA Matrix + RSI Levels)", value="", interactive=False, lines=6)
     
-        # Secure and compatible Auto Refresh Trigger Node for newer Gradio versions
-    gradio_interface.load(
+    # 1️⃣ Create a compatible production Timer instance for Gradio 5.0+ 
+    refresh_timer = gr.Timer(value=10, active=True)
+    
+    # 2️⃣ Link the continuous tick event to execute the metrics function every 10 seconds securely
+    refresh_timer.tick(
         fn=get_live_metrics_ui,
         outputs=[balance_box, pnl_box, wins_box, loss_box, status_box, floating_box, ai_box, log_area]
-    ).run_forever(every=10)
-
     )
 
 from contextlib import asynccontextmanager
@@ -435,3 +436,4 @@ app = gr.mount_gradio_app(app, gradio_interface, path="/")
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+
