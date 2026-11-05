@@ -125,7 +125,6 @@ async def model_agent_qwen_sentiment(headline: str) -> str:
 async def model_agent_deepseek_auditor(headline: str) -> str:
     if not HF_TOKEN: return "NEUTRAL"
     api_url = "https//:api-inference.huggingface.co/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-
     headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
     prompt = f"<|im_start|>system\nYou are a financial risk officer. Is this title dangerous? Respond with EXACTLY one word: BULLISH, BEARISH, or NEUTRAL.<|im_end|>\n<|im_start|>user\nHeadline: {headline}<|im_end|>\n<|im_start|>assistant\n"
     try:
