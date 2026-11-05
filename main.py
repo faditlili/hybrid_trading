@@ -373,12 +373,33 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "get_pnl":
         await query.edit_message_text(text=f"💵 Vault Balance: ${wallet_balance:.2f} USDT\n📈 Yield Net Profit: {daily_profit:.2f} USDT", reply_markup=get_dashboard_keyboard())
 
-# --- Full-Screen Professional Web Interface Terminal Setup ---
+# --- Full-Screen Professional Web Interface Terminal Setup (FIXED FOR INITIAL LIVE DATA LOAD) ---
+def update_ui_wrapper():
+    global wallet_balance, daily_profit, successful_trades, failed_trades, active_positions, bot_status
+    active_syms = list(active_positions.keys())
+    floating_tokens = ", ".join(active_syms) if active_syms else "None"
+    
+    chat_html_content = "<div style='background-color: #0d1117; padding: 10px; height: 200px; overflow-y: auto; font-size:0.85rem; border-radius:8px;'>"
+    for entry in reversed(ai_conversation_cache):
+        chat_html_content += f"<div style='margin-bottom:6px; border-left:4px solid #ffb100; padding-left:8px; color:#e6edf3;'>{entry}</div>"
+    chat_html_content += "</div>"
+    
+    return [
+        f"**🟢 Auto Trading Core State: {'RUNNING' if bot_status['automated_trading'] else 'PAUSED'}**",
+        f"## {wallet_balance:.2f} USDT", 
+        f"### +{daily_profit:.2f} USDT" if daily_profit >= 0 else f"### {daily_profit:.2f} USDT",
+        f"### {successful_trades} Targets Captured", 
+        f"### {failed_trades} Protection Exits", 
+        f"`[ Hanging Open Allocations: {floating_tokens} ]`",
+        chat_html_content, 
+        "\n".join(reversed(operation_logs_cache))
+    ]
+
 with gr.Blocks(theme=gr.themes.Default(primary_hue="amber", secondary_hue="slate"), title="Multi-Agent Quant Terminal") as gradio_interface:
     gr.HTML("<div style='text-align: center; padding: 10px 0; border-bottom: 1px solid #21262d;'><h1 style='color: #ffb100; margin: 0; font-size: 1.4rem;'>👑 TRIPLE AI CORE EXECUTIVE BOARD TERMINAL</h1><p style='color: #8b949e; margin: 2px; font-size: 0.75rem;'>Qwen 2.5 7B • DeepSeek-R1 • Llama 3.1 Live Consensus Architecture</p></div>")
     
     with gr.Row():
-        status_box = gr.Markdown(value="**🟢 System State: Active Real-Market Scanning Framework Mode**")
+        status_box = gr.Markdown(value="**🟢 System State: Ingesting Network Influx Framework...**")
         balance_box = gr.Markdown(value="## 200.00 USDT")
         pnl_box = gr.Markdown(value="### +0.00 USDT")
 
@@ -393,20 +414,6 @@ with gr.Blocks(theme=gr.themes.Default(primary_hue="amber", secondary_hue="slate
 
     refresh_timer = gr.Timer(value=5, active=True)
     
-    def update_ui_wrapper():
-        active_syms = list(active_positions.keys())
-        floating_tokens = ", ".join(active_syms) if active_syms else "None"
-        chat_html_content = "<div style='background-color: #0d1117; padding: 10px; height: 200px; overflow-y: auto; font-size:0.85rem; border-radius:8px;'>"
-        for entry in reversed(ai_conversation_cache):
-            chat_html_content += f"<div style='margin-bottom:6px; border-left:4px solid #ffb100; padding-left:8px; color:#e6edf3;'>{entry}</div>"
-        chat_html_content += "</div>"
-        return [
-            f"**🟢 Auto Trading Core State: {'RUNNING' if bot_status['automated_trading'] else 'PAUSED'}**",
-            f"## {wallet_balance:.2f} USDT", f"### +{daily_profit:.2f} USDT" if daily_profit >= 0 else f"### {daily_profit:.2f} USDT",
-            f"### {successful_trades} Targets Captured", f"### {failed_trades} Protection Exits", f"`[ Hanging Open Allocations: {floating_tokens} ]`",
-            chat_html_content, "\n".join(reversed(operation_logs_cache))
-        ]
-
     refresh_timer.tick(fn=update_ui_wrapper, outputs=[status_box, balance_box, pnl_box, wins_box, loss_box, floating_box, ai_chat_view, log_area])
     refresh_btn.click(fn=update_ui_wrapper, outputs=[status_box, balance_box, pnl_box, wins_box, loss_box, floating_box, ai_chat_view, log_area])
 
