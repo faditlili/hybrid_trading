@@ -160,7 +160,6 @@ async def model_agent_llama_technical(symbol: str, rsi: float, change: float) ->
     if not HF_TOKEN: return "NEUTRAL"
     api_url = "https//:api-inference.huggingface.co/models/meta-llama/Meta-Llama-3.1-8B-Instruct"
 
-"
     headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
     prompt = (
         f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n"
