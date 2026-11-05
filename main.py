@@ -457,10 +457,16 @@ with gr.Blocks(
     refresh_timer = gr.Timer(value=5, active=True)
     
     def update_ui_wrapper():
-        state_label = "🟢 ACTIVE & SCANNING" if bot_status["automated_trading"] else "🔴 PAUSED"
-        floating_tokens = ", ".join(active_positions.keys()) if active_positions else "None"
+        global wallet_balance, daily_profit, successful_trades, failed_trades, active_positions, bot_status
         
-        # Build Chat UI Component dynamically from logs cache
+        state_label = "ACTIVE & SCANNING" if bot_status.get("automated_trading", True) else "PAUSED"
+        
+        try:
+            current_active = list(active_positions.keys())
+            floating_tokens = ", ".join(current_active) if current_active else "None"
+        except Exception:
+            floating_tokens = "Processing..."
+
         chat_html_content = "<div class='chat-container'>"
         for entry in reversed(ai_conversation_cache):
             if entry.strip():
