@@ -167,17 +167,23 @@ async def model_agent_llama_technical(symbol: str, rsi: float, change: float) ->
         f"<|start_header_id|>user<|end_header_id|>\n"
         f"Asset {symbol}, RSI={rsi}, 24h Change={change}%<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n"
     )
-    try:
+        try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(api_url, json={"inputs": prompt, "parameters": {"max_new_tokens": 3, "temperature": 0.01}}, headers=headers, timeout=6) as res:
+            async with session.post(
+                api_url, 
+                json={"inputs": prompt, "parameters": {"max_new_tokens": 3, "temperature": 0.01}}, 
+                headers=headers, 
+                timeout=6
+            ) as res:
                 if res.status == 200:
                     data = await res.json()
-                    if isinstance(data, list) and len(data) > 0:
-                        out = data[0].get("generated_text", "").strip().upper()
+                if isinstance(data, list) and len(data) > 0:
+                    out = data[0].get("generated_text", "").strip().upper()
                         if "BUY" in out: return "BUY"
                         if "SELL" in out: return "SELL"
     except Exception: pass
     return "HOLD"
+
 # --- Real-Market Price Ticker Ingestion & Metric Calculations ---
 async def execute_bitcoin_macro_safety_check():
     api_url = "https//:binance.com/api/v3/ticker/24hr?symbol=BTCUSDT"
