@@ -180,7 +180,7 @@ async def execute_bitcoin_macro_safety_check():
     except Exception: pass
     return "BULLISH_REGIME", 0.0
 async def fetch_all_usdt_pairs_from_market():
-    api_url = "https://binance.com/api/v3/ticker/24hr"
+    api_url = "https//:binance.com/api/v3/ticker/24hr"
     target_assets = ["ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "DOGEUSDT", "LINKUSDT", "NEARUSDT", "PEPEUSDT"]
     live_pool = []
     try:
