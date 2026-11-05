@@ -71,7 +71,7 @@ def save_persistent_memory():
     except Exception as e:
         logger.error(f"Failed to write memory matrix onto disk storage: {str(e)}")
 
-# Invoke persistent financial matrix arrays on baseline bootstrap execution
+# Invoke persistent local array layers on baseline bootstrap execution
 load_persistent_memory()
 RISK_MANAGEMENT_FLOOR = 0.50  
 MAX_CONCURRENT_TRADES = 4  
@@ -93,9 +93,9 @@ def add_ai_dialogue(message: str):
     ai_conversation_cache.append(message)
     if len(ai_conversation_cache) > 8: ai_conversation_cache.pop(0)
 
-# --- 🌐 Multi-Feed Ingestion Core Matrix Node (Secure RSS Ingestion Architecture) ---
+# --- 🌐 Multi-Feed Ingestion Core Matrix Node (Secure RSS Architecture) ---
 async def fetch_aggregated_crypto_news_feeds():
-    """Asynchronously parses titles securely from open official RSS aggregator channels."""
+    """Asynchronously parses headlines securely from open official RSS aggregator channels."""
     feed_urls = [
         "https://cointelegraph.com",
         "https://coindesk.com"
@@ -109,11 +109,8 @@ async def fetch_aggregated_crypto_news_feeds():
                 async with session.get(url, headers=headers, timeout=6) as response:
                     if response.status == 200:
                         text = await response.text()
-                        
-                        # Secure XML Parser deployment to mitigate XXE injection vectors
                         parser = ET.XMLParser()
                         root = ET.fromstring(text, parser=parser)
-                        
                         for item in root.findall('.//item'):
                             title = item.find('title')
                             if title is not None and title.text:
@@ -131,7 +128,7 @@ async def fetch_aggregated_crypto_news_feeds():
     ]
 # --- 🧠 Qwen3.8-27B Context Ingestion Processing Layer (Serverless Inference Connection) ---
 async def evaluate_text_context_via_llama3(headline: str) -> str:
-    """Asynchronously passes unstructured news arrays to Hugging Face serverless execution layers."""
+    """Asynchronously passes unstructured strings to Hugging Face serverless execution layers."""
     if not HF_TOKEN:
         critical_words = ["hack", "exploit", "scam", "ban", "vulnerability", "investigation", "crash"]
         if any(w in headline.lower() for w in critical_words): return "BEARISH"
@@ -160,9 +157,8 @@ async def evaluate_text_context_via_llama3(headline: str) -> str:
             async with session.post(api_url, json=payload, headers=headers, timeout=7) as response:
                 if response.status == 200:
                     res_json = await response.json()
-                    # Secure List Array parsing logic to prevent indexing faults
                     if isinstance(res_json, list) and len(res_json) > 0:
-                        analysis = res_json[0].get("generated_text", "").strip().upper()
+                        analysis = res_json.get("generated_text", "").strip().upper()
                         if "BEARISH" in analysis: return "BEARISH"
                         if "BULLISH" in analysis: return "BULLISH"
                 return "NEUTRAL"
@@ -173,16 +169,27 @@ async def evaluate_text_context_via_llama3(headline: str) -> str:
 
 # --- 🪙 Bitcoin Macro Safety & Trend Regime Gauge ---
 async def execute_bitcoin_macro_safety_check():
-    """Monitors anchor coin matrix velocity to determine current global market regimes."""
-    simulated_btc_24h_velocity = random.uniform(-6.0, 4.0)
-    if simulated_btc_24h_velocity <= -1.5:
-        add_ai_dialogue(f"📉 [Macro Bitcoin Agent]: Bearish regime activated ({simulated_btc_24h_velocity}%). Directing core to capture SHORT opportunities.")
-        return "BEARISH_REGIME", simulated_btc_24h_velocity
-    return "BULLISH_REGIME", simulated_btc_24h_velocity
+    """Fetches real-time BTC 24h percentage velocity directly from Binance API to toggle market regimes."""
+    api_url = "https://binance.com"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(api_url, timeout=5) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    real_btc_velocity = round(float(data.get("priceChangePercent", 0)), 2)
+                    
+                    if real_btc_velocity <= -1.5:
+                        add_ai_dialogue(f"📉 [Macro Bitcoin Agent]: Real Bearish market regime verified ({real_btc_velocity}%). Targeting SHORT channels.")
+                        return "BEARISH_REGIME", real_btc_velocity
+                        
+                    return "BULLISH_REGIME", real_btc_velocity
+    except Exception as e:
+        logger.error(f"Macro Bitcoin Agent fallback activated due to API timeout: {str(e)}")
+    
+    return "BULLISH_REGIME", 0.0
 
 # --- ⚖️ Advanced Kelly Criterion Capital Sizing Math Model ---
 def calculate_kelly_criterion_allocation(strategy_confidence: float) -> float:
-    """Computes dynamic risk capital sizing ratios via statistical win/loss odds variables."""
     win_probability = strategy_confidence / 100.0
     loss_probability = 1.0 - win_probability
     payout_ratio = 2.0  
@@ -233,7 +240,6 @@ async def run_multi_agent_news_auditor(application: Application):
                         await application.bot.send_message(chat_id=ALLOWED_ADMIN_ID, text=alert_txt, parse_mode="Markdown")
 
 def execute_historical_backtest_audit(symbol: str) -> bool:
-    """Enforces strict statistical win floor constraints before allowing automated execution entries."""
     simulated_historical_success_rate = random.uniform(62.0, 89.5)
     if simulated_historical_success_rate >= 68.0:
         add_ai_dialogue(f"🔬 [Backtest Sandbox]: Passed multi-day backtest framework for {symbol} ({simulated_historical_success_rate:.1f}% Win-rate).")
@@ -241,7 +247,6 @@ def execute_historical_backtest_audit(symbol: str) -> bool:
     add_ai_dialogue(f"🚫 [Backtest Sandbox]: Refused trade entry on {symbol}. Backtest success vector fell below 68% boundary.")
     return False
 
-# --- 🪙 Real-Time Free Public Binance Exchange Connection Matrix ---
 async def fetch_all_usdt_pairs_from_market():
     """Asynchronously fetches real-time 24h market metrics directly from Binance Public REST API endpoints."""
     api_url = "https://binance.com"
@@ -270,45 +275,102 @@ async def fetch_all_usdt_pairs_from_market():
     return [{"symbol": "SOLUSDT", "price": 145.2, "change": 4.2, "quoteVolume": 25000000, "spread_pct": 0.03}]
 # --- 📊 Mathematical Real-Market Volumetric & Technical Profiler ---
 def scan_mtf_vsa_and_rsi_matrix(asset: dict, all_assets: list, market_regime: str):
-    """Analyzes volume spreads and calculates relative strength indexes to compile decision confidence layers."""
     price_change_24h = asset["change"]
     current_volume = asset["quoteVolume"]
     
-    total_market_vol = sum(x["quoteVolume"] for x in all_assets)
-    avg_market_vol = total_market_vol / len(all_assets) if all_assets else 1
+    all_volumes = sorted([x["quoteVolume"] for x in all_assets]) if all_assets else []
+    median_market_vol = all_volumes[len(all_volumes) // 2] if all_volumes else 1
     
     simulated_rsi = max(min(50 + (price_change_24h * 2.5), 95), 10)
-    is_high_liquidity_vsa = current_volume > (avg_market_vol * 1.2)
+    is_high_liquidity_vsa = current_volume > (median_market_vol * 1.1)
     
     action = "HOLD"
-    confidence = 50
+    confidence = 40
     
     if market_regime == "BULLISH_REGIME":
-        bullish_candles = [price_change_24h > 0.0, price_change_24h > 1.5, current_volume > avg_market_vol].count(True)
-        confidence = 40 + (bullish_candles * 12) + (10 if is_high_liquidity_vsa else 0)
-        if bullish_candles >= 2 and is_high_liquidity_vsa and simulated_rsi < 70:
+        bullish_candles = [price_change_24h > 0.0, price_change_24h > 1.2, is_high_liquidity_vsa].count(True)
+        confidence = 40 + (bullish_candles * 15) + (10 if is_high_liquidity_vsa else 0)
+        if bullish_candles >= 2 and is_high_liquidity_vsa and simulated_rsi < 75:
             action = "BUY"
             
     elif market_regime == "BEARISH_REGIME":
-        bearish_candles = [price_change_24h < 0.0, price_change_24h < -1.5, current_volume > avg_market_vol].count(True)
-        confidence = 40 + (bearish_candles * 12) + (10 if is_high_liquidity_vsa else 0)
-        if bearish_candles >= 2 and is_high_liquidity_vsa and simulated_rsi > 30:
+        bearish_candles = [price_change_24h < 0.0, price_change_24h < -1.2, is_high_liquidity_vsa].count(True)
+        confidence = 40 + (bearish_candles * 15) + (10 if is_high_liquidity_vsa else 0)
+        if bearish_candles >= 2 and is_high_liquidity_vsa and simulated_rsi > 25:
             action = "SELL"
             
     return min(confidence, 98), action, round(simulated_rsi, 1)
 
-# --- 🚀 Continuous Multi-Regime Execution Network Scanner Core ---
+# --- 🪙 Active Trade Manager & Live Monitor Grid ---
+async def monitor_and_manage_active_positions(live_market_pool: list, application: Application):
+    """Monitors open trade variables against real-time prices to fire automated exits securely."""
+    global wallet_balance, daily_profit, successful_trades, failed_trades
+    live_prices = {x["symbol"]: x["price"] for x in live_market_pool}
+    
+    # Enforce thread-safe collection parsing via list keys isolation
+    for symbol in list(active_positions.keys()):
+        if symbol not in live_prices: continue
+        
+        current_price = live_prices[symbol]
+        position = active_positions[symbol]
+        action = position['action']
+        allocated = position['allocated']
+        entry = position['entry_price']
+        
+        is_exit_triggered = False
+        exit_reason = ""
+        profit_loss_impact = 0.0
+        
+        if action == "BUY":
+            if current_price >= position['tp2']:
+                is_exit_triggered = True
+                exit_reason = "🎯 Take Profit 2 Cleared (+7.0%)"
+                profit_loss_impact = round(allocated * 0.07, 2)
+                successful_trades += 1
+            elif current_price <= round(entry * 0.985, 4):  
+                is_exit_triggered = True
+                exit_reason = "🛡️ Hard Stop-Loss Activated (-1.5%)"
+                profit_loss_impact = -round(allocated * 0.015, 2)
+                failed_trades += 1
+                
+        elif action == "SELL":
+            if current_price <= position['tp2']:
+                is_exit_triggered = True
+                exit_reason = "🎯 Take Profit 2 Cleared (+7.0%)"
+                profit_loss_impact = round(allocated * 0.07, 2)
+                successful_trades += 1
+            elif current_price >= round(entry * 1.015, 4):  
+                is_exit_triggered = True
+                exit_reason = "🛡️ Hard Stop-Loss Activated (-1.5%)"
+                profit_loss_impact = -round(allocated * 0.015, 2)
+                failed_trades += 1
+                
+        if is_exit_triggered:
+            wallet_balance += profit_loss_impact
+            daily_profit += profit_loss_impact
+            del active_positions[symbol]
+            save_persistent_memory()
+            
+            log_msg = f"✅ Position closed on {symbol} via {exit_reason}. Account matrix impact: {profit_loss_impact} USDT"
+            add_log_entry(f"🟢 Closed active allocation matrix tracker on {symbol}: {exit_reason}.")
+            
+            if application:
+                await application.bot.send_message(chat_id=ALLOWED_ADMIN_ID, text=log_msg, parse_mode="Markdown")
+
+# --- 🚀 Autonomous Execution Scanner Matrix ---
 async def execute_autonomous_market_scan(application: Application):
-    global wallet_balance, successful_trades, daily_profit, failed_trades
+    global wallet_balance
     
     if not bot_status["automated_trading"] or wallet_balance <= (INITIAL_BALANCE * RISK_MANAGEMENT_FLOOR):
         return
 
     market_regime, btc_vel = await execute_bitcoin_macro_safety_check()
     await run_multi_agent_news_auditor(application)
-    live_market_pool = await fetch_all_usdt_pairs_from_market()
-    trades_executed_this_run = 0
     
+    live_market_pool = await fetch_all_usdt_pairs_from_market()
+    await monitor_and_manage_active_positions(live_market_pool, application)
+    
+    trades_executed_this_run = 0
     for asset in live_market_pool:
         if trades_executed_this_run >= MAX_CONCURRENT_TRADES or len(active_positions) >= 3: break
         formatted_display_name = asset["symbol"]
@@ -316,7 +378,6 @@ async def execute_autonomous_market_scan(application: Application):
 
         confidence, action, rsi_val = scan_mtf_vsa_and_rsi_matrix(asset, live_market_pool, market_regime)
         
-        # Enforce strict user configuration threshold boundary matching (80% Floor)
         if confidence >= bot_status["confidence_threshold"] and action in ["BUY", "SELL"]:
             if not execute_historical_backtest_audit(formatted_display_name): continue
             
@@ -345,34 +406,12 @@ async def execute_autonomous_market_scan(application: Application):
                 f"🎯 Mathematical Confidence: `{confidence}%`\n"
                 f"💰 Calculated Allocation Capital: `${allocated_trade_amount} USDT`"
             )
-            add_log_entry(f"🔥 Entry: Execution entry {action} triggered on {formatted_display_name} via statistical odds formulas.")
+            add_log_entry(f"🔥 Entry: Execution entry {action} triggered on {formatted_display_name} and locked onto dashboard matrix.")
             
             if application:
                 await application.bot.send_message(chat_id=ALLOWED_ADMIN_ID, text=entry_msg, parse_mode="Markdown")
             
-            await asyncio.sleep(0.4)
-            if formatted_display_name in active_positions:
-                if random.random() < 0.86:
-                    successful_trades += 1
-                    percentage = random.uniform(3.5, 7.5)
-                    profit_gain = round(allocated_trade_amount * (percentage / 100), 2)
-                    wallet_balance += profit_gain
-                    daily_profit += profit_gain
-                    exit_msg = f"✅ **MULTI-STAGE PROFIT LOCKED ({action}):**\n\n🔹 Asset: `{formatted_display_name}`\n💵 Compounded Yield: `+${profit_gain} USDT`"
-                    add_log_entry(f"🟢 Target Lock: Closed {formatted_display_name} with yield performance matrix credit.")
-                else:
-                    failed_trades += 1
-                    percentage = random.uniform(0.4, 0.7)
-                    loss_take = round(allocated_trade_amount * (percentage / 100), 2)
-                    wallet_balance -= loss_take
-                    daily_profit -= loss_take
-                    exit_msg = f"❌ **PROTECTION MATRIX TERMINATION ({action}):**\n\n🔹 Asset: `{formatted_display_name}`\n📉 Vault Drawdown: `-${loss_take} USDT`"
-                    add_log_entry(f"🔴 Trailing Stop Activated: Exited allocation on {formatted_display_name} to preserve capital floors.")
-                
-                save_persistent_memory()
-                if formatted_display_name in active_positions: del active_positions[formatted_display_name]
-                if application:
-                    await application.bot.send_message(chat_id=ALLOWED_ADMIN_ID, text=exit_msg, parse_mode="Markdown")
+            save_persistent_memory()
 
 async def background_scanner_loop(application: Application):
     global is_scanning_loop_active
@@ -409,7 +448,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "get_pnl":
         await query.edit_message_text(text=f"💵 Balance: ${wallet_balance:.2f} USDT\n📈 Yield Net: {daily_profit:.2f} USDT", reply_markup=get_dashboard_keyboard())
 
-# --- 👑 Premium Fluid Full-Width UI Framework with Agent Chats ---
 with gr.Blocks(
     theme=gr.themes.Default(primary_hue="amber", secondary_hue="slate"),
     title="Elite Quantitative Terminal",
@@ -465,7 +503,6 @@ with gr.Blocks(
 
     refresh_timer = gr.Timer(value=5, active=True)
     
-    # Secure Thread-safe Dynamic UI Synchronization Wrapper (Fixed Global Memory Scope Bugs)
     def update_ui_wrapper():
         global wallet_balance, daily_profit, successful_trades, failed_trades, active_positions, bot_status
         
