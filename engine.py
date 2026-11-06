@@ -1,9 +1,17 @@
+
 import asyncio
 import logging
 from datetime import datetime, timezone
 
-from config import SYMBOLS, SCAN_INTERVAL_SECONDS, MIN_SCORE_TO_ENTER
+from config import (
+    SYMBOLS,
+    SCAN_INTERVAL_SECONDS,
+    MIN_SCORE_TO_ENTER,
+    TIMEFRAME
+)
+
 from technical_analysis import calculate_indicators
+
 from decision_engine import (
     calculate_technical_score,
     evaluate_setup
@@ -78,9 +86,10 @@ class TradingEngine:
 
         try:
 
-            candles = await self.market.get_klines(
-                "BTCUSDT"
-            )
+            candles = await self.market.get_klines("BTCUSDT")
+
+            if candles is None or candles.empty:
+                return "UNKNOWN"
 
             indicators = calculate_indicators(candles)
 
@@ -103,30 +112,43 @@ class TradingEngine:
 
             return "UNKNOWN"
 
+    def save_decision(self, result):
+
+        try:
+            self.db.log_decision({
+                **result,
+                "timestamp": utc_timestamp()
+            })
+
+        except Exception:
+            logger.exception(
+                "Could not save decision for %s",
+                result.get("symbol", "UNKNOWN")
+            )
+
     async def scan_once(self):
 
         async with self.scan_lock:
 
             started_at = utc_timestamp()
-
             results = []
 
             try:
 
-                # مراقبة الصفقات الافتراضية المفتوحة أولاً
-                await self.trader.update_positions(
-                    self.market
-                )
+                await self.trader.update_positions(self.market)
 
                 regime = await self.get_market_regime()
-
                 self.market_regime = regime
 
                 if regime != "BULLISH":
 
                     self.last_results = []
                     self.last_scan = started_at
-                    self.last_error = None
+                    self.last_error = (
+                        "BTC market regime unavailable"
+                        if regime == "UNKNOWN"
+                        else None
+                    )
 
                     logger.info(
                         "Scan skipped: market regime is %s",
@@ -142,55 +164,63 @@ class TradingEngine:
 
                     try:
 
-                        snapshot = (
-                            await self.market.get_market_snapshot(
-                                symbol
-                            )
+                        snapshot = await self.market.get_market_snapshot(
+                            symbol
                         )
 
                         if not snapshot:
                             continue
 
-                        candles = snapshot["candles"]
+                        ticker = snapshot.get("ticker")
+                        candles = snapshot.get("candles")
 
-                        indicators = calculate_indicators(
-                            candles
-                        )
+                        if not ticker or candles is None:
+                            continue
+
+                        price = ticker.get("price")
+
+                        if not isinstance(price, (int, float)):
+                            continue
+
+                        if price <= 0:
+                            continue
+
+                        indicators = calculate_indicators(candles)
 
                         if not indicators:
                             continue
 
-                        # تقييم فني أولي قبل استدعاء النماذج
                         technical = calculate_technical_score(
                             indicators,
                             regime
                         )
 
-                        # لا نستهلك طلبات AI إذا كان الحد الأقصى
-                        # الممكن بعد إضافة تصويت AI أقل من العتبة
                         if (
                             technical["score"] + 15
                             < MIN_SCORE_TO_ENTER
                         ):
 
-                            results.append({
+                            result = {
                                 "symbol": symbol,
-                                "price": snapshot["ticker"]["price"],
+                                "price": price,
                                 "score": technical["score"],
                                 "action": "WAIT",
                                 "reasons": technical["reasons"],
                                 "ai_vote": "SKIPPED",
                                 "opened": False
-                            })
+                            }
+
+                            results.append(result)
+                            self.save_decision(result)
 
                             continue
 
                         ai_result = await self.ai.analyze({
                             "symbol": symbol,
-                            "timeframe": "15m",
-                            "price": snapshot["ticker"]["price"],
-                            "change_24h": snapshot["ticker"]["change_pct"],
-                            "quote_volume": snapshot["ticker"]["quote_volume"],
+                            "timeframe": TIMEFRAME,
+                            "price": price,
+                            "change_24h": ticker["change_pct"],
+                            "quote_volume": ticker["quote_volume"],
                             "indicators": indicators
                         })
 
@@ -206,13 +236,13 @@ class TradingEngine:
 
                             opened = self.trader.open_position(
                                 symbol,
-                                snapshot["ticker"]["price"],
+                                price,
                                 indicators["atr"]
                             )
 
                         result = {
                             "symbol": symbol,
-                            "price": snapshot["ticker"]["price"],
+                            "price": price,
                             "score": decision["score"],
                             "action": decision["action"],
                             "reasons": decision["reasons"],
@@ -224,17 +254,7 @@ class TradingEngine:
                         }
 
                         results.append(result)
-
-                        try:
-                            self.db.log_decision({
-                                **result,
-                                "timestamp": utc_timestamp()
-                            })
-                        except Exception:
-                            logger.exception(
-                                "Could not save decision for %s",
-                                symbol
-                            )
+                        self.save_decision(result)
 
                     except Exception as exc:
 
@@ -259,9 +279,7 @@ class TradingEngine:
 
                 self.last_error = str(exc)[:300]
 
-                logger.exception(
-                    "Market scan failed"
-                )
+                logger.exception("Market scan failed")
 
                 self.last_scan = started_at
                 self.last_results = results
@@ -306,4 +324,5 @@ class TradingEngine:
         logger.info("AI QUANT scanner stopped")
 
     def stop(self):
+
         self.running = False
