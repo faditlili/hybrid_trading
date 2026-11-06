@@ -1,9 +1,15 @@
 import asyncio
+import logging
 from datetime import datetime, timezone
 
-from config import SYMBOLS, SCAN_INTERVAL_SECONDS
+from config import SYMBOLS, SCAN_INTERVAL_SECONDS, MIN_SCORE_TO_ENTER
 from technical_analysis import calculate_indicators
-from decision_engine import evaluate_setup
+from decision_engine import (
+    calculate_technical_score,
+    evaluate_setup
+)
+
+logger = logging.getLogger(__name__)
 
 
 def utc_timestamp():
@@ -12,69 +18,87 @@ def utc_timestamp():
 
 class TradingEngine:
 
-    def __init__(
-        self,
-        market_data,
-        ai_council,
-        news_engine,
-        trader,
-        database
-    ):
+    def __init__(self, market, ai, news, trader, db):
 
-        self.market = market_data
-        self.ai = ai_council
-        self.news = news_engine
+        self.market = market
+        self.ai = ai
+        self.news = news
         self.trader = trader
-        self.db = database
+        self.db = db
 
         self.running = False
         self.scan_lock = asyncio.Lock()
 
         self.last_scan = None
         self.last_results = []
+        self.market_regime = "UNKNOWN"
+        self.last_error = None
 
     async def start(self):
 
-        await self.market.start()
+        started = []
 
         try:
+            await self.market.start()
+            started.append(self.market)
+
             await self.ai.start()
+            started.append(self.ai)
+
             await self.news.start()
+            started.append(self.news)
+
+            logger.info("AI QUANT services started")
 
         except Exception:
-            await self.market.close()
+
+            for service in reversed(started):
+                try:
+                    await service.close()
+                except Exception:
+                    logger.exception("Service cleanup failed")
+
             raise
 
     async def close(self):
 
-        await self.market.close()
-        await self.ai.close()
-        await self.news.close()
+        self.running = False
+
+        for service in (
+            self.news,
+            self.ai,
+            self.market
+        ):
+            try:
+                await service.close()
+            except Exception:
+                logger.exception("Service shutdown failed")
 
     async def get_market_regime(self):
 
         try:
 
             candles = await self.market.get_klines(
-                "BTCUSDT",
-                limit=100
+                "BTCUSDT"
             )
 
             indicators = calculate_indicators(candles)
 
-            if (
+            if not indicators:
+                return "UNKNOWN"
+
+            bullish = (
                 indicators["ema9"] > indicators["ema21"]
                 and indicators["ema21"] > indicators["ema50"]
-            ):
-                return "BULLISH"
+            )
 
-            return "NOT_BULLISH"
+            return "BULLISH" if bullish else "NOT_BULLISH"
 
         except Exception as exc:
 
-            self.db.log_event(
-                "ERROR",
-                f"BTC regime error: {str(exc)[:250]}"
+            logger.warning(
+                "Market regime calculation failed: %s",
+                str(exc)[:200]
             )
 
             return "UNKNOWN"
@@ -83,159 +107,203 @@ class TradingEngine:
 
         async with self.scan_lock:
 
+            started_at = utc_timestamp()
+
             results = []
 
-            # مراقبة الصفقات المفتوحة أولاً
-            position_updates = await self.trader.update_positions(
-                self.market
-            )
+            try:
 
-            for symbol, ok, result in position_updates:
-
-                if not ok:
-
-                    self.db.log_event(
-                        "WARNING",
-                        f"{symbol}: {result}"
-                    )
-
-            # تحديد حالة السوق
-            regime = await self.get_market_regime()
-
-            if regime != "BULLISH":
-
-                self.db.log_event(
-                    "INFO",
-                    f"New entries paused: BTC regime is {regime}"
+                # مراقبة الصفقات الافتراضية المفتوحة أولاً
+                await self.trader.update_positions(
+                    self.market
                 )
 
-                self.last_scan = utc_timestamp()
-                self.last_results = []
+                regime = await self.get_market_regime()
 
-                return []
+                self.market_regime = regime
 
-            # فحص العملات
-            for symbol in SYMBOLS:
+                if regime != "BULLISH":
 
-                if symbol in self.trader.positions:
-                    continue
+                    self.last_results = []
+                    self.last_scan = started_at
+                    self.last_error = None
 
-                try:
-
-                    snapshot = await self.market.get_market_snapshot(
-                        symbol
-                    )
-
-                    if snapshot is None:
-                        continue
-
-                    indicators = calculate_indicators(
-                        snapshot["candles"]
-                    )
-
-                    # تحليل الذكاء الاصطناعي
-                    ai_result = await self.ai.analyze(
-                        symbol,
-                        indicators,
+                    logger.info(
+                        "Scan skipped: market regime is %s",
                         regime
                     )
 
-                    # تقييم القرار
-                    decision = evaluate_setup(
-                        indicators,
-                        regime,
-                        ai_result
-                    )
+                    return []
 
-                    self.db.log_decision(
-                        symbol,
-                        decision["score"],
-                        decision["action"],
-                        decision["reasons"]
-                    )
+                for symbol in SYMBOLS:
 
-                    result = {
-                        "symbol": symbol,
-                        "price": indicators["price"],
-                        "score": decision["score"],
-                        "action": decision["action"],
-                        "reasons": decision["reasons"],
-                        "ai_vote": ai_result["vote"],
-                        "opened": False
-                    }
+                    if symbol in self.trader.positions:
+                        continue
 
-                    if decision["action"] == "PAPER_BUY":
+                    try:
 
-                        opened, details = self.trader.open_position(
-                            symbol,
-                            indicators["price"],
-                            indicators["atr"]
+                        snapshot = (
+                            await self.market.get_market_snapshot(
+                                symbol
+                            )
                         )
 
-                        result["opened"] = opened
+                        if not snapshot:
+                            continue
 
-                        if not opened:
-                            result["message"] = details
+                        candles = snapshot["candles"]
 
-                        else:
-                            self.db.log_event(
-                                "INFO",
-                                f"Paper position opened: {symbol}"
+                        indicators = calculate_indicators(
+                            candles
+                        )
+
+                        if not indicators:
+                            continue
+
+                        # تقييم فني أولي قبل استدعاء النماذج
+                        technical = calculate_technical_score(
+                            indicators,
+                            regime
+                        )
+
+                        # لا نستهلك طلبات AI إذا كان الحد الأقصى
+                        # الممكن بعد إضافة تصويت AI أقل من العتبة
+                        if (
+                            technical["score"] + 15
+                            < MIN_SCORE_TO_ENTER
+                        ):
+
+                            results.append({
+                                "symbol": symbol,
+                                "price": snapshot["ticker"]["price"],
+                                "score": technical["score"],
+                                "action": "WAIT",
+                                "reasons": technical["reasons"],
+                                "ai_vote": "SKIPPED",
+                                "opened": False
+                            })
+
+                            continue
+
+                        ai_result = await self.ai.analyze({
+                            "symbol": symbol,
+                            "timeframe": "15m",
+                            "price": snapshot["ticker"]["price"],
+                            "change_24h": snapshot["ticker"]["change_pct"],
+                            "quote_volume": snapshot["ticker"]["quote_volume"],
+                            "indicators": indicators
+                        })
+
+                        decision = evaluate_setup(
+                            indicators,
+                            regime,
+                            ai_result
+                        )
+
+                        opened = False
+
+                        if decision["action"] == "PAPER_BUY":
+
+                            opened = self.trader.open_position(
+                                symbol,
+                                snapshot["ticker"]["price"],
+                                indicators["atr"]
                             )
 
-                    results.append(result)
+                        result = {
+                            "symbol": symbol,
+                            "price": snapshot["ticker"]["price"],
+                            "score": decision["score"],
+                            "action": decision["action"],
+                            "reasons": decision["reasons"],
+                            "ai_vote": ai_result.get(
+                                "vote",
+                                "UNAVAILABLE"
+                            ),
+                            "opened": opened
+                        }
 
-                except Exception as exc:
+                        results.append(result)
 
-                    self.db.log_event(
-                        "ERROR",
-                        f"{symbol} scan error: {str(exc)[:250]}"
-                    )
+                        try:
+                            self.db.log_decision({
+                                **result,
+                                "timestamp": utc_timestamp()
+                            })
+                        except Exception:
+                            logger.exception(
+                                "Could not save decision for %s",
+                                symbol
+                            )
 
-            self.last_scan = utc_timestamp()
-            self.last_results = results
+                    except Exception as exc:
 
-            return results
+                        logger.warning(
+                            "Symbol scan failed for %s: %s",
+                            symbol,
+                            str(exc)[:200]
+                        )
+
+                self.last_scan = started_at
+                self.last_results = results
+                self.last_error = None
+
+                logger.info(
+                    "Scan completed: %s symbols evaluated",
+                    len(results)
+                )
+
+                return results
+
+            except Exception as exc:
+
+                self.last_error = str(exc)[:300]
+
+                logger.exception(
+                    "Market scan failed"
+                )
+
+                self.last_scan = started_at
+                self.last_results = results
+
+                return results
 
     async def run_forever(self):
 
-        if self.running:
-            return
-
         self.running = True
 
-        self.db.log_event(
-            "INFO",
-            "AI QUANT scanner started"
-        )
+        logger.info("AI QUANT scanner started")
 
-        try:
+        while self.running:
 
-            while self.running:
+            cycle_start = asyncio.get_running_loop().time()
 
-                try:
-                    await self.scan_once()
+            try:
+                await self.scan_once()
 
-                except Exception as exc:
+            except asyncio.CancelledError:
+                raise
 
-                    self.db.log_event(
-                        "ERROR",
-                        f"Scanner cycle error: {str(exc)[:300]}"
-                    )
+            except Exception:
+                logger.exception("Scanner cycle failed")
 
-                await asyncio.sleep(
-                    SCAN_INTERVAL_SECONDS
-                )
-
-        finally:
-
-            self.running = False
-
-            self.db.log_event(
-                "INFO",
-                "AI QUANT scanner stopped"
+            elapsed = (
+                asyncio.get_running_loop().time()
+                - cycle_start
             )
 
-    def stop(self):
+            remaining = max(
+                1,
+                SCAN_INTERVAL_SECONDS - elapsed
+            )
 
+            try:
+                await asyncio.sleep(remaining)
+
+            except asyncio.CancelledError:
+                raise
+
+        logger.info("AI QUANT scanner stopped")
+
+    def stop(self):
         self.running = False
