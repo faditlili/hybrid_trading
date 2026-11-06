@@ -4,6 +4,8 @@ import math
 
 from datetime import datetime, timezone
 
+import pandas as pd
+
 from config import (
     SYMBOLS,
     SCAN_INTERVAL_SECONDS,
@@ -51,11 +53,19 @@ def safe_reasons(value):
     if not isinstance(value, (list, tuple)):
         return ["No explanation provided"]
 
-    return [
-        str(reason)[:300]
-        for reason in value
-        if reason is not None
-    ][:20]
+    reasons = []
+
+    for reason in value:
+
+        if reason is None:
+            continue
+
+        reasons.append(str(reason)[:300])
+
+        if len(reasons) >= 20:
+            break
+
+    return reasons or ["No explanation provided"]
 
 
 class TradingEngine:
@@ -83,6 +93,7 @@ class TradingEngine:
         self.market_regime = "UNKNOWN"
 
         self.scan_lock = asyncio.Lock()
+        self.lifecycle_lock = asyncio.Lock()
 
         self.last_decisions = []
 
@@ -107,8 +118,9 @@ class TradingEngine:
         if (
             isinstance(SCAN_INTERVAL_SECONDS, bool)
             or not valid_number(SCAN_INTERVAL_SECONDS)
-            or SCAN_INTERVAL_SECONDS <= 0
+            or float(SCAN_INTERVAL_SECONDS) <= 0
         ):
+
             raise ValueError(
                 "SCAN_INTERVAL_SECONDS must be positive"
             )
@@ -118,16 +130,19 @@ class TradingEngine:
             or not valid_number(MIN_SCORE_TO_ENTER)
             or not 0 <= float(MIN_SCORE_TO_ENTER) <= 100
         ):
+
             raise ValueError(
                 "MIN_SCORE_TO_ENTER must be between 0 and 100"
             )
 
         if not isinstance(SYMBOLS, (list, tuple)):
+
             raise ValueError(
                 "SYMBOLS must be a list or tuple"
             )
 
         if not SYMBOLS:
+
             raise ValueError(
                 "SYMBOLS cannot be empty"
             )
@@ -137,6 +152,7 @@ class TradingEngine:
         for symbol in SYMBOLS:
 
             if not isinstance(symbol, str):
+
                 raise ValueError(
                     "Every symbol must be a string"
                 )
@@ -144,6 +160,7 @@ class TradingEngine:
             symbol = symbol.strip().upper()
 
             if not symbol:
+
                 raise ValueError(
                     "SYMBOLS contains an empty symbol"
                 )
@@ -163,49 +180,53 @@ class TradingEngine:
 
     async def start(self):
 
-        if self.running:
-            logger.warning(
-                "Trading engine is already running"
-            )
-            return
+        async with self.lifecycle_lock:
 
-        logger.info(
-            "Starting AI QUANT engine in PAPER mode"
-        )
+            if self.running:
 
-        components = (
-            self.market,
-            self.ai,
-            self.news
-        )
-
-        try:
-
-            for component in components:
-
-                await component.start()
-
-                self._started_components.append(
-                    component
+                logger.warning(
+                    "Trading engine is already running"
                 )
 
-            self.running = True
+                return
 
             logger.info(
-                "AI QUANT engine started successfully"
+                "Starting AI QUANT in PAPER mode"
             )
 
-        except BaseException:
-
-            logger.exception(
-                "Engine startup failed. Rolling back components"
+            components = (
+                self.market,
+                self.ai,
+                self.news
             )
 
-            self.running = False
+            try:
 
-            await self._close_started_components()
+                for component in components:
 
-            raise
+                    await component.start()
+
+                    self._started_components.append(
+                        component
+                    )
+
+                self.running = True
+
+                logger.info(
+                    "AI QUANT engine started successfully"
+                )
+
+            except BaseException:
+
+                logger.exception(
+                    "Engine startup failed. Rolling back components"
+                )
+
+                self.running = False
+
+                await self._close_started_components()
+
+                raise
 
     async def _close_started_components(self):
 
@@ -230,13 +251,15 @@ class TradingEngine:
 
     async def close(self):
 
-        self.running = False
+        async with self.lifecycle_lock:
 
-        await self._close_started_components()
+            self.running = False
 
-        logger.info(
-            "AI QUANT engine stopped"
-        )
+            await self._close_started_components()
+
+            logger.info(
+                "AI QUANT engine stopped"
+            )
 
     async def get_market_regime(self):
 
@@ -251,7 +274,7 @@ class TradingEngine:
 
             candles = snapshot.get("klines")
 
-            if not isinstance(candles, (list, tuple)):
+            if not isinstance(candles, pd.DataFrame):
                 return "UNKNOWN"
 
             indicators = calculate_indicators(
@@ -425,14 +448,16 @@ class TradingEngine:
 
             candles = snapshot.get("klines")
 
-            if not isinstance(candles, (list, tuple)):
+            # technical_analysis requires a DataFrame.
+
+            if not isinstance(candles, pd.DataFrame):
 
                 self.record_decision(
                     symbol,
                     "WAIT",
                     0,
                     "UNAVAILABLE",
-                    ["Invalid candle data"]
+                    ["Invalid candle data: DataFrame required"]
                 )
 
                 stats["rejected"] += 1
@@ -486,7 +511,10 @@ class TradingEngine:
 
             technical_score = technical.get("score")
 
-            if not valid_number(technical_score):
+            if (
+                not valid_number(technical_score)
+                or not 0 <= float(technical_score) <= 85
+            ):
 
                 self.record_decision(
                     symbol,
@@ -540,6 +568,7 @@ class TradingEngine:
             )
 
             if not isinstance(ai_result, dict):
+
                 ai_result = {
                     "vote": "UNAVAILABLE",
                     "reason": "Invalid AI response"
@@ -577,7 +606,7 @@ class TradingEngine:
                 decision.get("reasons", [])
             )
 
-            # Paper trading only.
+            # Only PAPER_BUY is an accepted entry action.
 
             if action == "PAPER_BUY":
 
@@ -587,6 +616,8 @@ class TradingEngine:
                 if (
                     not valid_number(price)
                     or not valid_number(atr)
+                    or float(price) <= 0
+                    or float(atr) <= 0
                 ):
 
                     action = "WAIT"
@@ -621,6 +652,15 @@ class TradingEngine:
 
             else:
 
+                # Do not allow unexpected action values.
+
+                if action != "WAIT":
+                    action = "WAIT"
+
+                    reasons.append(
+                        "Unsupported decision action"
+                    )
+
                 stats["rejected"] += 1
 
             self.record_decision(
@@ -654,6 +694,15 @@ class TradingEngine:
 
     async def scan_once(self):
 
+        if not self.running:
+
+            return {
+                "status": "NOT_RUNNING",
+                "message": "Trading engine is not running"
+            }
+
+        # Prevent overlapping scans.
+
         if self.scan_lock.locked():
 
             return {
@@ -662,6 +711,13 @@ class TradingEngine:
             }
 
         async with self.scan_lock:
+
+            if not self.running:
+
+                return {
+                    "status": "NOT_RUNNING",
+                    "message": "Trading engine is not running"
+                }
 
             logger.info(
                 "Starting market scan"
@@ -685,6 +741,13 @@ class TradingEngine:
                     self.market
                 )
 
+                if not self.running:
+
+                    return {
+                        "status": "STOPPED",
+                        "stats": dict(stats)
+                    }
+
                 # Determine BTC market regime.
 
                 self.market_regime = (
@@ -703,6 +766,9 @@ class TradingEngine:
                 # Scan configured symbols.
 
                 for symbol in self.symbols:
+
+                    if not self.running:
+                        break
 
                     await self._scan_symbol(
                         symbol,
