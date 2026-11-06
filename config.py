@@ -60,6 +60,10 @@ KLINE_LIMIT = 200
 
 MIN_QUOTE_VOLUME = 5_000_000.0
 
+# ============================================================
+# MARKET SYMBOLS - BINGX
+# ============================================================
+
 SYMBOLS = [
     "BTC-USDT",
     "ETH-USDT",
@@ -67,6 +71,14 @@ SYMBOLS = [
     "SOL-USDT",
     "XRP-USDT",
 ]
+
+BINGX_SYMBOL_MAP = {
+    "BTC-USDT": "BTC-USDT",
+    "ETH-USDT": "ETH-USDT",
+    "BNB-USDT": "BNB-USDT",
+    "SOL-USDT": "SOL-USDT",
+    "XRP-USDT": "XRP-USDT",
+}
 
 # ============================================================
 # ENGINE
@@ -281,7 +293,8 @@ def validate_config():
                 not isinstance(symbol, str)
                 or not symbol
                 or symbol != symbol.upper()
-                or not symbol.isalnum()
+                or symbol.count("-") != 1
+or not all(part.isalnum() for part in symbol.split("-"))
             ):
                 errors.append(f"Invalid trading symbol: {symbol!r}")
 
