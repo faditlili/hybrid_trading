@@ -566,6 +566,19 @@ def evaluate_setup(
             f"AI: {ai_reason.strip()[:200]}"
         )
 
+    if (
+    not isinstance(ai_reason, str)
+    or not ai_reason.strip()
+):
+    return {
+        "action": "WAIT",
+        "score": technical_score,
+        "reasons": [
+            "AI response is missing a valid explanation"
+        ],
+        "ai_vote": "UNAVAILABLE",
+    }
+    
     # --------------------------------------------------------
     # AI MUST APPROVE
     # --------------------------------------------------------
