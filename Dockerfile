@@ -6,7 +6,7 @@ ENV PYTHONUNBUFFERED=1
 
 # Application settings
 ENV HOST=0.0.0.0
-ENV PORT=7860
+ENV PORT=0.0.0.0
 ENV DB_PATH=/data/ai_quant.db
 
 WORKDIR /code
