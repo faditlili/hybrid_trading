@@ -1,10 +1,13 @@
 import asyncio
-import aiohttp
 import logging
 import re
+import time
 import xml.etree.ElementTree as ET
 
 from html import unescape
+
+import aiohttp
+
 
 logger = logging.getLogger(__name__)
 
@@ -18,8 +21,13 @@ FEED_URLS = [
 class NewsEngine:
 
     def __init__(self):
+
         self.session = None
         self.latest_news = []
+        self.lock = asyncio.Lock()
+
+        self.last_fetch = 0
+        self.fetch_interval = 300
 
     async def start(self):
 
@@ -28,133 +36,270 @@ class NewsEngine:
 
         timeout = aiohttp.ClientTimeout(
             total=15,
-            connect=5
+            connect=8
+        )
+
+        connector = aiohttp.TCPConnector(
+            limit=10,
+            ttl_dns_cache=300
         )
 
         self.session = aiohttp.ClientSession(
             timeout=timeout,
+            connector=connector,
             headers={
-                "User-Agent": "AI-QUANT-PAPER/1.0"
+                "User-Agent": "AI-QUANT/3.0"
             }
         )
+
+        logger.info("News engine started")
 
     async def close(self):
 
         if self.session and not self.session.closed:
+
             await self.session.close()
 
-    def clean_text(self, value):
+        self.session = None
 
-        if not value:
+        logger.info("News engine stopped")
+
+    def clean_text(self, text):
+
+        if not text:
             return ""
 
-        value = re.sub(r"<[^>]+>", " ", value)
-        value = unescape(value)
-        value = re.sub(r"\s+", " ", value)
+        text = unescape(str(text))
 
-        return value.strip()
+        text = re.sub(
+            r"<[^>]+>",
+            " ",
+            text
+        )
+
+        text = re.sub(
+            r"\s+",
+            " ",
+            text
+        )
+
+        return text.strip()
 
     async def fetch_feed(self, url):
 
-        if not self.session or self.session.closed:
+        if not self.session:
             return []
 
         try:
 
             async with self.session.get(url) as response:
 
-                response.raise_for_status()
+                if response.status != 200:
+
+                    logger.warning(
+                        "RSS source returned HTTP %s",
+                        response.status
+                    )
+
+                    return []
+
                 content = await response.text()
 
             root = ET.fromstring(content)
-            items = root.findall(".//item")
+
+            items = root.findall(
+                ".//item"
+            )
+
+            # RSS 2.0 fallback for Atom feeds
+            if not items:
+
+                items = root.findall(
+                    ".//{http://www.w3.org/2005/Atom}entry"
+                )
 
             news = []
 
             for item in items[:30]:
 
+                title_element = item.find("title")
+
+                if title_element is None:
+
+                    title_element = item.find(
+                        "{http://www.w3.org/2005/Atom}title"
+                    )
+
+                if title_element is None:
+                    continue
+
                 title = self.clean_text(
-                    item.findtext("title", "")
-                )
-
-                link = self.clean_text(
-                    item.findtext("link", "")
-                )
-
-                description = self.clean_text(
-                    item.findtext("description", "")
-                )
-
-                published = self.clean_text(
-                    item.findtext("pubDate", "")
+                    title_element.text
                 )
 
                 if not title:
                     continue
 
+                link_element = item.find("link")
+
+                if link_element is None:
+
+                    link_element = item.find(
+                        "{http://www.w3.org/2005/Atom}link"
+                    )
+
+                link = ""
+
+                if link_element is not None:
+
+                    link = (
+                        link_element.text
+                        or link_element.attrib.get("href", "")
+                    )
+
+                description_element = item.find(
+                    "description"
+                )
+
+                if description_element is None:
+
+                    description_element = item.find(
+                        "{http://www.w3.org/2005/Atom}summary"
+                    )
+
+                description = ""
+
+                if description_element is not None:
+
+                    description = self.clean_text(
+                        description_element.text
+                    )
+
+                date_element = item.find("pubDate")
+
+                if date_element is None:
+
+                    date_element = item.find(
+                        "{http://www.w3.org/2005/Atom}published"
+                    )
+
+                published = ""
+
+                if date_element is not None:
+
+                    published = self.clean_text(
+                        date_element.text
+                    )
+
                 news.append({
                     "title": title[:300],
-                    "description": description[:1000],
-                    "link": link[:1000],
-                    "published": published[:100]
+                    "link": str(link)[:1000],
+                    "description": description[:700],
+                    "published": published[:100],
+                    "source": url
                 })
 
             return news
 
-        except (
-            aiohttp.ClientError,
-            asyncio.TimeoutError,
-            ET.ParseError,
-            ValueError
-        ) as exc:
+        except asyncio.TimeoutError:
 
             logger.warning(
-                "News feed failed (%s): %s",
+                "RSS timeout: %s",
+                url
+            )
+
+            return []
+
+        except (
+            aiohttp.ClientError,
+            ET.ParseError,
+            ValueError,
+            TypeError
+        ) as error:
+
+            logger.warning(
+                "RSS fetch failed for %s: %s",
                 url,
-                str(exc)[:200]
+                error
             )
 
             return []
 
     async def fetch_all(self):
 
-        feeds = await asyncio.gather(
-            *[
+        async with self.lock:
+
+            if not self.session:
+                return self.latest_news
+
+            tasks = [
                 self.fetch_feed(url)
                 for url in FEED_URLS
-            ],
-            return_exceptions=True
-        )
+            ]
 
-        combined = []
-        seen = set()
+            results = await asyncio.gather(
+                *tasks,
+                return_exceptions=True
+            )
 
-        for feed in feeds:
+            combined = []
 
-            if isinstance(feed, Exception):
-                continue
+            for result in results:
 
-            for item in feed:
+                if isinstance(result, Exception):
 
-                key = item["title"].lower()
+                    logger.warning(
+                        "RSS task failed: %s",
+                        result
+                    )
 
-                if key in seen:
                     continue
 
-                seen.add(key)
-                combined.append(item)
+                combined.extend(result)
 
-        self.latest_news = combined[:30]
+            unique = {}
 
-        return self.latest_news
+            for item in combined:
+
+                title = item.get(
+                    "title",
+                    ""
+                ).strip().lower()
+
+                if title and title not in unique:
+
+                    unique[title] = item
+
+            self.latest_news = list(
+                unique.values()
+            )[:60]
+
+            self.last_fetch = time.time()
+
+            logger.info(
+                "News updated: %s items",
+                len(self.latest_news)
+            )
+
+            return self.latest_news
 
     async def get_news(self, limit=20):
 
         if not isinstance(limit, int):
             limit = 20
 
-        limit = max(1, min(limit, 30))
+        limit = max(
+            1,
+            min(limit, 60)
+        )
 
-        news = await self.fetch_all()
+        now = time.time()
 
-        return news[:limit]
+        if (
+            not self.latest_news
+            or now - self.last_fetch >= self.fetch_interval
+        ):
+
+            await self.fetch_all()
+
+        return self.latest_news[:limit]
