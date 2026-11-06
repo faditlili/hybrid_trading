@@ -2,6 +2,7 @@ from config import MIN_SCORE_TO_ENTER
 
 
 def evaluate_setup(indicators, market_regime, ai_result):
+
     score = 0
     reasons = []
 
@@ -16,31 +17,44 @@ def evaluate_setup(indicators, market_regime, ai_result):
         return {
             "action": "WAIT",
             "score": 0,
-            "reasons": ["تصويت الذكاء الاصطناعي لا يؤكد الشراء"]
+            "reasons": ["لا يوجد توافق كافٍ من نماذج الذكاء الاصطناعي"]
         }
 
     ema9 = indicators["ema9"]
     ema21 = indicators["ema21"]
     ema50 = indicators["ema50"]
 
+    # اتجاه المتوسطات
     if ema9 > ema21 > ema50:
         score += 25
-        reasons.append("ترتيب المتوسطات إيجابي")
+        reasons.append("ترتيب المتوسطات إيجابي بالكامل")
 
     elif ema9 > ema21:
         score += 15
-        reasons.append("تقاطع المتوسطات إيجابي جزئياً")
+        reasons.append("ترتيب المتوسطات إيجابي جزئياً")
 
+    # موقع السعر بالنسبة للمتوسط الطويل
+    if indicators["price"] > ema50:
+        score += 10
+        reasons.append("السعر أعلى EMA50")
+
+    # MACD
     if indicators["macd"] > indicators["macd_signal"]:
         score += 15
         reasons.append("MACD إيجابي")
 
+    # RSI
     rsi = indicators["rsi"]
 
     if 48 <= rsi <= 68:
         score += 15
         reasons.append("RSI ضمن النطاق المحدد")
 
+    elif 42 <= rsi < 48 or 68 < rsi <= 72:
+        score += 7
+        reasons.append("RSI مقبول جزئياً")
+
+    # حجم التداول
     volume = indicators["volume"]
     volume_avg = indicators["volume_avg"]
 
@@ -48,8 +62,18 @@ def evaluate_setup(indicators, market_regime, ai_result):
         score += 10
         reasons.append("حجم التداول أعلى من المتوسط")
 
+    elif volume_avg > 0 and volume >= volume_avg:
+        score += 5
+        reasons.append("حجم التداول قريب من المتوسط")
+
+    # حركة السعر الأخيرة
+    if indicators["price"] > indicators["previous_close"]:
+        score += 10
+        reasons.append("إغلاق الشمعة أعلى من السابقة")
+
+    # توافق الذكاء الاصطناعي
     score += 15
-    reasons.append("تصويت الذكاء الاصطناعي BUY")
+    reasons.append("توافق نماذج الذكاء الاصطناعي: BUY")
 
     action = (
         "PAPER_BUY"
@@ -58,7 +82,9 @@ def evaluate_setup(indicators, market_regime, ai_result):
     )
 
     if action == "WAIT":
-        reasons.append("النقاط أقل من حد الدخول")
+        reasons.append(
+            f"النقاط {score} أقل من الحد المطلوب {MIN_SCORE_TO_ENTER}"
+        )
 
     return {
         "action": action,
