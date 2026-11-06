@@ -54,14 +54,18 @@ app = gr.mount_gradio_app(
 
 @app.on_event("startup")
 async def startup_event():
+
     logger.info("Starting AI QUANT")
 
     try:
+
         await controller.start()
 
         try:
             await telegram.start()
+
         except Exception as exc:
+
             logger.error(
                 "Telegram startup failed: %s",
                 exc
@@ -71,17 +75,25 @@ async def startup_event():
             controller.run_forever()
         )
 
-        logger.info("AI QUANT started")
+        logger.info("AI QUANT started successfully")
 
     except Exception as exc:
+
         logger.exception(
-            "Startup failed: %s",
+            "AI QUANT startup failed: %s",
             exc
         )
+
+        try:
+            await controller.close()
+
+        except Exception:
+            logger.exception("Resource cleanup failed")
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
+
     logger.info("Stopping AI QUANT")
 
     controller.stop()
@@ -93,31 +105,36 @@ async def shutdown_event():
     )
 
     if task:
+
         task.cancel()
 
         try:
             await task
+
         except asyncio.CancelledError:
             pass
 
     await telegram.stop()
+
     await controller.close()
 
     db.close()
 
-    logger.info("AI QUANT stopped")
-
 
 @app.get("/health")
 async def health():
+
     return {
         "status": "online",
         "system": "AI QUANT",
-        "mode": "PAPER_TRADING_ONLY"
+        "mode": "PAPER_TRADING_ONLY",
+        "scanner_running": controller.running,
+        "last_scan": controller.last_scan
     }
 
 
 if __name__ == "__main__":
+
     import uvicorn
 
     port = int(
