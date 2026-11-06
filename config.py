@@ -289,13 +289,14 @@ def validate_config():
             errors.append("SYMBOLS contains duplicate entries.")
 
         for symbol in SYMBOLS:
-            if (
-                not isinstance(symbol, str)
-                or not symbol
-                or symbol != symbol.upper()
-                or symbol.count("-") != 1
-or not all(part.isalnum() for part in symbol.split("-"))
-            ):
+    if (
+        not isinstance(symbol, str)
+        or not symbol
+        or symbol != symbol.upper()
+        or symbol.count("-") != 1
+        or not all(part.isalnum() for part in symbol.split("-"))
+    ):
+        errors.append(f"Invalid trading symbol: {symbol!r}")
                 errors.append(f"Invalid trading symbol: {symbol!r}")
 
     # --------------------------------------------------------
