@@ -1,3 +1,4 @@
+
 import asyncio
 import logging
 import math
@@ -9,15 +10,16 @@ import pandas as pd
 from config import (
     SYMBOLS,
     SCAN_INTERVAL_SECONDS,
+    MAX_SCAN_DURATION_SECONDS,
     MIN_SCORE_TO_ENTER,
-    PAPER_MODE
+    PAPER_MODE,
 )
 
 from technical_analysis import calculate_indicators
 
 from decision_engine import (
     calculate_technical_score,
-    evaluate_setup
+    evaluate_setup,
 )
 
 
@@ -76,7 +78,7 @@ class TradingEngine:
         ai,
         news,
         trader,
-        db
+        db,
     ):
 
         self.market = market
@@ -103,10 +105,14 @@ class TradingEngine:
             "scanned": 0,
             "rejected": 0,
             "approved": 0,
-            "errors": 0
+            "errors": 0,
         }
 
         self._validate_config()
+
+    # ========================================================
+    # CONFIGURATION
+    # ========================================================
 
     def _validate_config(self):
 
@@ -115,34 +121,40 @@ class TradingEngine:
                 "AI QUANT only supports PAPER_MODE=True"
             )
 
-        if (
-            isinstance(SCAN_INTERVAL_SECONDS, bool)
-            or not valid_number(SCAN_INTERVAL_SECONDS)
-            or float(SCAN_INTERVAL_SECONDS) <= 0
-        ):
+        numeric_settings = {
+            "SCAN_INTERVAL_SECONDS": SCAN_INTERVAL_SECONDS,
+            "MAX_SCAN_DURATION_SECONDS": MAX_SCAN_DURATION_SECONDS,
+            "MIN_SCORE_TO_ENTER": MIN_SCORE_TO_ENTER,
+        }
 
+        for name, value in numeric_settings.items():
+
+            if not valid_number(value):
+                raise ValueError(
+                    f"{name} must be a valid finite number"
+                )
+
+        if SCAN_INTERVAL_SECONDS <= 0:
             raise ValueError(
                 "SCAN_INTERVAL_SECONDS must be positive"
             )
 
-        if (
-            isinstance(MIN_SCORE_TO_ENTER, bool)
-            or not valid_number(MIN_SCORE_TO_ENTER)
-            or not 0 <= float(MIN_SCORE_TO_ENTER) <= 100
-        ):
+        if MAX_SCAN_DURATION_SECONDS <= 0:
+            raise ValueError(
+                "MAX_SCAN_DURATION_SECONDS must be positive"
+            )
 
+        if not 0 <= MIN_SCORE_TO_ENTER <= 100:
             raise ValueError(
                 "MIN_SCORE_TO_ENTER must be between 0 and 100"
             )
 
         if not isinstance(SYMBOLS, (list, tuple)):
-
             raise ValueError(
                 "SYMBOLS must be a list or tuple"
             )
 
         if not SYMBOLS:
-
             raise ValueError(
                 "SYMBOLS cannot be empty"
             )
@@ -152,7 +164,6 @@ class TradingEngine:
         for symbol in SYMBOLS:
 
             if not isinstance(symbol, str):
-
                 raise ValueError(
                     "Every symbol must be a string"
                 )
@@ -160,13 +171,16 @@ class TradingEngine:
             symbol = symbol.strip().upper()
 
             if not symbol:
-
                 raise ValueError(
                     "SYMBOLS contains an empty symbol"
                 )
 
-            if symbol not in normalized:
-                normalized.append(symbol)
+            if symbol in normalized:
+                raise ValueError(
+                    f"Duplicate symbol: {symbol}"
+                )
+
+            normalized.append(symbol)
 
         self.symbols = normalized
 
@@ -174,20 +188,26 @@ class TradingEngine:
             SCAN_INTERVAL_SECONDS
         )
 
+        self.max_scan_duration = float(
+            MAX_SCAN_DURATION_SECONDS
+        )
+
         self.minimum_score = float(
             MIN_SCORE_TO_ENTER
         )
+
+    # ========================================================
+    # LIFECYCLE
+    # ========================================================
 
     async def start(self):
 
         async with self.lifecycle_lock:
 
             if self.running:
-
                 logger.warning(
                     "Trading engine is already running"
                 )
-
                 return
 
             logger.info(
@@ -197,7 +217,7 @@ class TradingEngine:
             components = (
                 self.market,
                 self.ai,
-                self.news
+                self.news,
             )
 
             try:
@@ -246,7 +266,7 @@ class TradingEngine:
 
                 logger.exception(
                     "Component shutdown failed: %s",
-                    type(component).__name__
+                    type(component).__name__,
                 )
 
     async def close(self):
@@ -255,11 +275,20 @@ class TradingEngine:
 
             self.running = False
 
-            await self._close_started_components()
+            # Wait for an active scan to finish or time out
+            # before closing its dependencies.
+
+            async with self.scan_lock:
+
+                await self._close_started_components()
 
             logger.info(
                 "AI QUANT engine stopped"
             )
+
+    # ========================================================
+    # MARKET REGIME
+    # ========================================================
 
     async def get_market_regime(self):
 
@@ -288,7 +317,7 @@ class TradingEngine:
                 "ema9",
                 "ema21",
                 "ema50",
-                "price"
+                "price",
             )
 
             for key in required:
@@ -327,6 +356,10 @@ class TradingEngine:
 
             return "UNKNOWN"
 
+    # ========================================================
+    # DECISION STORAGE
+    # ========================================================
+
     def save_decision(self, result):
 
         try:
@@ -349,7 +382,7 @@ class TradingEngine:
         action,
         score,
         ai_vote,
-        reasons
+        reasons,
     ):
 
         result = {
@@ -357,7 +390,7 @@ class TradingEngine:
             "action": str(action),
             "score": safe_float(score),
             "ai_vote": str(ai_vote),
-            "reasons": safe_reasons(reasons)
+            "reasons": safe_reasons(reasons),
         }
 
         self.last_decisions.append(result)
@@ -369,6 +402,10 @@ class TradingEngine:
         self.save_decision(result)
 
         return result
+
+    # ========================================================
+    # NEWS CONTEXT
+    # ========================================================
 
     async def _get_news_context(self):
 
@@ -401,7 +438,7 @@ class TradingEngine:
 
                 news_context.append({
                     "title": title[:300],
-                    "description": description[:600]
+                    "description": description[:600],
                 })
 
             return news_context
@@ -413,16 +450,20 @@ class TradingEngine:
 
             logger.warning(
                 "News unavailable during scan",
-                exc_info=True
+                exc_info=True,
             )
 
             return []
+
+    # ========================================================
+    # SYMBOL SCANNING
+    # ========================================================
 
     async def _scan_symbol(
         self,
         symbol,
         news_context,
-        stats
+        stats,
     ):
 
         stats["scanned"] += 1
@@ -440,15 +481,13 @@ class TradingEngine:
                     "WAIT",
                     0,
                     "UNAVAILABLE",
-                    ["Market snapshot unavailable"]
+                    ["Market snapshot unavailable"],
                 )
 
                 stats["rejected"] += 1
                 return
 
             candles = snapshot.get("klines")
-
-            # technical_analysis requires a DataFrame.
 
             if not isinstance(candles, pd.DataFrame):
 
@@ -457,7 +496,7 @@ class TradingEngine:
                     "WAIT",
                     0,
                     "UNAVAILABLE",
-                    ["Invalid candle data: DataFrame required"]
+                    ["Invalid candle data: DataFrame required"],
                 )
 
                 stats["rejected"] += 1
@@ -474,7 +513,7 @@ class TradingEngine:
                     "WAIT",
                     0,
                     "UNAVAILABLE",
-                    ["Invalid technical data"]
+                    ["Invalid technical data"],
                 )
 
                 stats["rejected"] += 1
@@ -484,7 +523,7 @@ class TradingEngine:
 
             technical = calculate_technical_score(
                 indicators,
-                self.market_regime
+                self.market_regime,
             )
 
             if (
@@ -503,7 +542,7 @@ class TradingEngine:
                     "WAIT",
                     0,
                     "UNAVAILABLE",
-                    reasons
+                    reasons,
                 )
 
                 stats["rejected"] += 1
@@ -521,7 +560,7 @@ class TradingEngine:
                     "WAIT",
                     0,
                     "UNAVAILABLE",
-                    ["Invalid technical score"]
+                    ["Invalid technical score"],
                 )
 
                 stats["rejected"] += 1
@@ -547,7 +586,7 @@ class TradingEngine:
                         technical.get("reasons", [])
                     ) + [
                         "Technical score below entry threshold"
-                    ]
+                    ],
                 )
 
                 stats["rejected"] += 1
@@ -560,7 +599,7 @@ class TradingEngine:
                 "market_regime": self.market_regime,
                 "indicators": indicators,
                 "technical_score": technical_score,
-                "recent_news": news_context
+                "recent_news": news_context,
             }
 
             ai_result = await self.ai.analyze(
@@ -571,7 +610,7 @@ class TradingEngine:
 
                 ai_result = {
                     "vote": "UNAVAILABLE",
-                    "reason": "Invalid AI response"
+                    "reason": "Invalid AI response",
                 }
 
             # Final decision.
@@ -580,18 +619,17 @@ class TradingEngine:
                 indicators,
                 self.market_regime,
                 ai_result,
-                technical_result=technical
+                technical_result=technical,
             )
 
             if not isinstance(decision, dict):
-
                 raise ValueError(
                     "Decision engine returned an invalid result"
                 )
 
             action = decision.get(
                 "action",
-                "WAIT"
+                "WAIT",
             )
 
             score = safe_float(
@@ -633,7 +671,7 @@ class TradingEngine:
                     opened = self.trader.open_position(
                         symbol,
                         float(price),
-                        float(atr)
+                        float(atr),
                     )
 
                     if opened:
@@ -652,9 +690,8 @@ class TradingEngine:
 
             else:
 
-                # Do not allow unexpected action values.
-
                 if action != "WAIT":
+
                     action = "WAIT"
 
                     reasons.append(
@@ -668,7 +705,7 @@ class TradingEngine:
                 action,
                 score,
                 ai_vote,
-                reasons
+                reasons,
             )
 
         except asyncio.CancelledError:
@@ -681,7 +718,7 @@ class TradingEngine:
 
             logger.exception(
                 "Scan failed for %s",
-                symbol
+                symbol,
             )
 
             self.record_decision(
@@ -689,8 +726,57 @@ class TradingEngine:
                 "ERROR",
                 0,
                 "UNAVAILABLE",
-                [str(error)[:200]]
+                [str(error)[:200]],
             )
+
+    # ========================================================
+    # ONE SCAN CYCLE
+    # ========================================================
+
+    async def _run_scan_cycle(self, stats):
+
+        # Update existing simulated positions.
+
+        await self.trader.update_positions(
+            self.market
+        )
+
+        if not self.running:
+            return "STOPPED"
+
+        # Determine BTC market regime.
+
+        self.market_regime = (
+            await self.get_market_regime()
+        )
+
+        logger.info(
+            "BTC market regime: %s",
+            self.market_regime,
+        )
+
+        # Collect recent news.
+
+        news_context = await self._get_news_context()
+
+        # Scan configured symbols.
+
+        for symbol in self.symbols:
+
+            if not self.running:
+                return "STOPPED"
+
+            await self._scan_symbol(
+                symbol,
+                news_context,
+                stats,
+            )
+
+        return "COMPLETED"
+
+    # ========================================================
+    # SCAN CONTROL
+    # ========================================================
 
     async def scan_once(self):
 
@@ -698,16 +784,14 @@ class TradingEngine:
 
             return {
                 "status": "NOT_RUNNING",
-                "message": "Trading engine is not running"
+                "message": "Trading engine is not running",
             }
-
-        # Prevent overlapping scans.
 
         if self.scan_lock.locked():
 
             return {
                 "status": "BUSY",
-                "message": "A scan is already running"
+                "message": "A scan is already running",
             }
 
         async with self.scan_lock:
@@ -716,7 +800,7 @@ class TradingEngine:
 
                 return {
                     "status": "NOT_RUNNING",
-                    "message": "Trading engine is not running"
+                    "message": "Trading engine is not running",
                 }
 
             logger.info(
@@ -730,65 +814,60 @@ class TradingEngine:
                 "scanned": 0,
                 "rejected": 0,
                 "approved": 0,
-                "errors": 0
+                "errors": 0,
             }
 
             try:
 
-                # Update existing simulated positions.
+                async with asyncio.timeout(
+                    self.max_scan_duration
+                ):
 
-                await self.trader.update_positions(
-                    self.market
-                )
-
-                if not self.running:
-
-                    return {
-                        "status": "STOPPED",
-                        "stats": dict(stats)
-                    }
-
-                # Determine BTC market regime.
-
-                self.market_regime = (
-                    await self.get_market_regime()
-                )
-
-                logger.info(
-                    "BTC market regime: %s",
-                    self.market_regime
-                )
-
-                # Collect recent news.
-
-                news_context = await self._get_news_context()
-
-                # Scan configured symbols.
-
-                for symbol in self.symbols:
-
-                    if not self.running:
-                        break
-
-                    await self._scan_symbol(
-                        symbol,
-                        news_context,
+                    status = await self._run_scan_cycle(
                         stats
                     )
 
                 self.scan_stats = dict(stats)
-
                 self.last_scan = utc_timestamp()
+
+                if status == "STOPPED":
+
+                    return {
+                        "status": "STOPPED",
+                        "regime": self.market_regime,
+                        "stats": dict(stats),
+                    }
 
                 logger.info(
                     "Scan completed: %s",
-                    stats
+                    stats,
                 )
 
                 return {
                     "status": "COMPLETED",
                     "regime": self.market_regime,
-                    "stats": dict(stats)
+                    "stats": dict(stats),
+                }
+
+            except TimeoutError:
+
+                self.last_error = (
+                    "Scan exceeded MAX_SCAN_DURATION_SECONDS"
+                )
+
+                self.scan_stats = dict(stats)
+                self.last_scan = utc_timestamp()
+
+                logger.warning(
+                    "Market scan timed out after %.1f seconds",
+                    self.max_scan_duration,
+                )
+
+                return {
+                    "status": "TIMEOUT",
+                    "message": self.last_error,
+                    "regime": self.market_regime,
+                    "stats": dict(stats),
                 }
 
             except asyncio.CancelledError:
@@ -803,12 +882,17 @@ class TradingEngine:
                 )
 
                 self.scan_stats = dict(stats)
+                self.last_scan = utc_timestamp()
 
                 return {
                     "status": "ERROR",
                     "message": self.last_error,
-                    "stats": dict(stats)
+                    "stats": dict(stats),
                 }
+
+    # ========================================================
+    # BACKGROUND SCANNER
+    # ========================================================
 
     async def run_forever(self):
 
