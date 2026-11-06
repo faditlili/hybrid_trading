@@ -11,7 +11,7 @@ from config import (
     SIMULATED_SLIPPAGE_BPS,
     STOP_ATR_MULTIPLIER,
     TARGET_R_MULTIPLIER,
-    MAX_OPEN_POSITIONS
+    MAX_OPEN_POSITIONS,
 )
 
 
@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 
 
 def valid_number(value):
-
     if isinstance(value, bool):
         return False
 
@@ -30,7 +29,6 @@ def valid_number(value):
 
 
 def safe_float(value, default=0.0):
-
     if valid_number(value):
         return float(value)
 
@@ -49,94 +47,59 @@ class PaperTrader:
 
         self.db = db
         self.lock = threading.RLock()
+        self.update_lock = asyncio.Lock()
 
         self._validate_config()
 
         account = self.db.get_account()
 
         if not isinstance(account, dict):
-            raise RuntimeError(
-                "Unable to load paper account"
-            )
+            raise RuntimeError("Unable to load paper account")
 
-        if not valid_number(account.get("balance")):
-            raise RuntimeError(
-                "Invalid paper account balance"
-            )
-
-        if not valid_number(account.get("realized_pnl")):
-            raise RuntimeError(
-                "Invalid paper account realized PnL"
-            )
+        if (
+            not valid_number(account.get("balance"))
+            or not valid_number(account.get("realized_pnl"))
+        ):
+            raise RuntimeError("Invalid paper account data")
 
         self.balance = float(account["balance"])
         self.realized_pnl = float(account["realized_pnl"])
 
         if self.balance < 0:
-            raise ValueError(
-                "Account balance cannot be negative"
-            )
+            raise ValueError("Account balance cannot be negative")
 
         self.live_marks = {}
 
     def _validate_config(self):
 
         checks = [
-            (
-                INITIAL_BALANCE,
-                "INITIAL_BALANCE",
-                lambda x: x > 0
-            ),
-            (
-                RISK_PER_TRADE_PCT,
-                "RISK_PER_TRADE_PCT",
-                lambda x: 0 < x <= 1
-            ),
-            (
-                MAX_ALLOCATION_PCT,
-                "MAX_ALLOCATION_PCT",
-                lambda x: 0 < x <= 1
-            ),
-            (
-                FEE_RATE,
-                "FEE_RATE",
-                lambda x: 0 <= x < 1
-            ),
-            (
-                SIMULATED_SLIPPAGE_BPS,
-                "SIMULATED_SLIPPAGE_BPS",
-                lambda x: 0 <= x < 10000
-            ),
-            (
-                STOP_ATR_MULTIPLIER,
-                "STOP_ATR_MULTIPLIER",
-                lambda x: x > 0
-            ),
-            (
-                TARGET_R_MULTIPLIER,
-                "TARGET_R_MULTIPLIER",
-                lambda x: x > 0
-            )
+            (INITIAL_BALANCE, "INITIAL_BALANCE", lambda x: x > 0),
+            (RISK_PER_TRADE_PCT, "RISK_PER_TRADE_PCT",
+             lambda x: 0 < x <= 1),
+            (MAX_ALLOCATION_PCT, "MAX_ALLOCATION_PCT",
+             lambda x: 0 < x <= 1),
+            (FEE_RATE, "FEE_RATE", lambda x: 0 <= x < 1),
+            (SIMULATED_SLIPPAGE_BPS, "SIMULATED_SLIPPAGE_BPS",
+             lambda x: 0 <= x < 10000),
+            (STOP_ATR_MULTIPLIER, "STOP_ATR_MULTIPLIER",
+             lambda x: x > 0),
+            (TARGET_R_MULTIPLIER, "TARGET_R_MULTIPLIER",
+             lambda x: x > 0),
         ]
 
         for value, name, condition in checks:
-
             if (
                 not valid_number(value)
                 or not condition(float(value))
             ):
-                raise ValueError(
-                    f"Invalid configuration: {name}"
-                )
+                raise ValueError(f"Invalid configuration: {name}")
 
         if (
             isinstance(MAX_OPEN_POSITIONS, bool)
             or not isinstance(MAX_OPEN_POSITIONS, int)
             or MAX_OPEN_POSITIONS < 1
         ):
-            raise ValueError(
-                "Invalid MAX_OPEN_POSITIONS"
-            )
+            raise ValueError("Invalid MAX_OPEN_POSITIONS")
 
     def _get_positions(self):
 
@@ -147,46 +110,88 @@ class PaperTrader:
                 "Invalid positions returned by database"
             )
 
-        return [
-            dict(position)
-            for position in positions
-            if isinstance(position, dict)
-        ]
+        result = []
+
+        for position in positions:
+            if not isinstance(position, dict):
+                raise RuntimeError(
+                    "Database returned an invalid position"
+                )
+
+            result.append(dict(position))
+
+        return result
+
+    def _validate_position(self, position):
+
+        if not isinstance(position, dict):
+            return False
+
+        symbol = position.get("symbol")
+
+        if not isinstance(symbol, str) or not symbol.strip():
+            return False
+
+        quantity = position.get("quantity")
+        entry_price = position.get("entry_price")
+        allocation = position.get("allocation")
+        entry_fee = position.get("entry_fee")
+
+        if not all(
+            valid_number(value)
+            for value in (
+                quantity,
+                entry_price,
+                allocation,
+                entry_fee,
+            )
+        ):
+            return False
+
+        quantity = float(quantity)
+        entry_price = float(entry_price)
+        allocation = float(allocation)
+        entry_fee = float(entry_fee)
+
+        if (
+            quantity <= 0
+            or entry_price <= 0
+            or allocation <= 0
+            or entry_fee < 0
+        ):
+            return False
+
+        return math.isclose(
+            quantity * entry_price,
+            allocation,
+            rel_tol=1e-8,
+            abs_tol=1e-8,
+        )
 
     def _slippage(self):
 
-        return (
-            float(SIMULATED_SLIPPAGE_BPS)
-            / 10000.0
-        )
+        return float(SIMULATED_SLIPPAGE_BPS) / 10000.0
 
-    def _calculate_position_size(
-        self,
-        price,
-        stop_distance
-    ):
+    def _calculate_position_size(self, price, stop_distance):
 
         slippage = self._slippage()
         fee_rate = float(FEE_RATE)
 
         entry_price = price * (1.0 + slippage)
-
         stop_loss = entry_price - stop_distance
 
-        if stop_loss <= 0:
+        if (
+            not valid_number(entry_price)
+            or not valid_number(stop_loss)
+            or entry_price <= 0
+            or stop_loss <= 0
+        ):
             return None
 
-        estimated_stop_exit = (
-            stop_loss * (1.0 - slippage)
-        )
+        estimated_stop_exit = stop_loss * (1.0 - slippage)
 
-        entry_fee_per_unit = (
-            entry_price * fee_rate
-        )
-
-        exit_fee_per_unit = (
-            estimated_stop_exit * fee_rate
-        )
+        entry_fee_per_unit = entry_price * fee_rate
+        exit_fee_per_unit = estimated_stop_exit * fee_rate
 
         estimated_loss_per_unit = (
             entry_price
@@ -201,41 +206,24 @@ class PaperTrader:
         ):
             return None
 
-        risk_budget = (
-            self.balance
-            * float(RISK_PER_TRADE_PCT)
-        )
+        risk_budget = self.balance * float(RISK_PER_TRADE_PCT)
+        max_allocation = self.balance * float(MAX_ALLOCATION_PCT)
 
-        max_allocation = (
-            self.balance
-            * float(MAX_ALLOCATION_PCT)
-        )
-
-        quantity_by_risk = (
-            risk_budget
-            / estimated_loss_per_unit
-        )
-
-        quantity_by_allocation = (
-            max_allocation
-            / entry_price
-        )
+        quantity_by_risk = risk_budget / estimated_loss_per_unit
+        quantity_by_allocation = max_allocation / entry_price
 
         quantity = min(
             quantity_by_risk,
-            quantity_by_allocation
+            quantity_by_allocation,
         )
 
-        if (
-            not valid_number(quantity)
-            or quantity <= 0
-        ):
+        if not valid_number(quantity) or quantity <= 0:
             return None
 
         return {
             "quantity": quantity,
             "entry_price": entry_price,
-            "stop_loss": stop_loss
+            "stop_loss": stop_loss,
         }
 
     def open_position(self, symbol, price, atr):
@@ -270,16 +258,15 @@ class PaperTrader:
 
             try:
                 positions = self._get_positions()
-
             except Exception:
                 logger.exception(
                     "Unable to read positions before opening %s",
-                    symbol
+                    symbol,
                 )
                 return False
 
             if any(
-                str(p.get("symbol", "")).upper() == symbol
+                str(p.get("symbol", "")).strip().upper() == symbol
                 for p in positions
             ):
                 return False
@@ -287,9 +274,7 @@ class PaperTrader:
             if len(positions) >= MAX_OPEN_POSITIONS:
                 return False
 
-            stop_distance = (
-                atr * float(STOP_ATR_MULTIPLIER)
-            )
+            stop_distance = atr * float(STOP_ATR_MULTIPLIER)
 
             if (
                 not valid_number(stop_distance)
@@ -299,7 +284,7 @@ class PaperTrader:
 
             sizing = self._calculate_position_size(
                 price,
-                stop_distance
+                stop_distance,
             )
 
             if not isinstance(sizing, dict):
@@ -309,20 +294,17 @@ class PaperTrader:
             entry_price = sizing["entry_price"]
             stop_loss = sizing["stop_loss"]
 
-            allocation = (
-                quantity * entry_price
-            )
-
-            entry_fee = (
-                allocation * float(FEE_RATE)
-            )
-
-            total_cost = (
-                allocation + entry_fee
-            )
+            allocation = quantity * entry_price
+            entry_fee = allocation * float(FEE_RATE)
+            total_cost = allocation + entry_fee
 
             if (
-                not valid_number(total_cost)
+                not all(valid_number(v) for v in (
+                    allocation,
+                    entry_fee,
+                    total_cost,
+                ))
+                or allocation <= 0
                 or total_cost <= 0
                 or total_cost > self.balance
             ):
@@ -339,11 +321,9 @@ class PaperTrader:
             ):
                 return False
 
-            new_balance = (
-                self.balance - total_cost
-            )
+            new_balance = self.balance - total_cost
 
-            if not valid_number(new_balance):
+            if not valid_number(new_balance) or new_balance < 0:
                 return False
 
             position = {
@@ -353,19 +333,18 @@ class PaperTrader:
                 "allocation": allocation,
                 "entry_fee": entry_fee,
                 "stop_loss": stop_loss,
-                "take_profit": take_profit
+                "take_profit": take_profit,
             }
 
             try:
                 success = self.db.open_position_atomic(
                     position,
-                    new_balance
+                    new_balance,
                 )
-
             except Exception:
                 logger.exception(
                     "Database error while opening %s",
-                    symbol
+                    symbol,
                 )
                 return False
 
@@ -376,22 +355,14 @@ class PaperTrader:
 
             self.live_marks[symbol] = {
                 "current_price": entry_price,
-                "unrealized_pnl": 0.0
+                "unrealized_pnl": 0.0,
             }
 
-            logger.info(
-                "Paper position opened: %s",
-                symbol
-            )
+            logger.info("Paper position opened: %s", symbol)
 
             return True
 
-    def close_position(
-        self,
-        symbol,
-        price,
-        reason=""
-    ):
+    def close_position(self, symbol, price, reason=""):
 
         with self.lock:
 
@@ -400,10 +371,7 @@ class PaperTrader:
 
             symbol = symbol.strip().upper()
 
-            if (
-                not symbol
-                or not valid_number(price)
-            ):
+            if not symbol or not valid_number(price):
                 return False
 
             price = float(price)
@@ -413,68 +381,34 @@ class PaperTrader:
 
             try:
                 positions = self._get_positions()
-
             except Exception:
                 logger.exception(
                     "Unable to read positions before closing %s",
-                    symbol
+                    symbol,
                 )
                 return False
 
             position = next(
                 (
                     p for p in positions
-                    if str(p.get("symbol", "")).upper() == symbol
+                    if str(p.get("symbol", "")).strip().upper() == symbol
                 ),
-                None
+                None,
             )
 
             if position is None:
                 return False
 
-            quantity = safe_float(
-                position.get("quantity")
-            )
-
-            entry_price = safe_float(
-                position.get("entry_price")
-            )
-
-            allocation = safe_float(
-                position.get("allocation")
-            )
-
-            entry_fee = safe_float(
-                position.get("entry_fee")
-            )
-
-            if (
-                quantity <= 0
-                or entry_price <= 0
-                or allocation <= 0
-                or entry_fee < 0
-            ):
-                logger.error(
-                    "Invalid stored position: %s",
-                    symbol
-                )
+            if not self._validate_position(position):
+                logger.error("Invalid stored position: %s", symbol)
                 return False
 
-            if not math.isclose(
-                quantity * entry_price,
-                allocation,
-                rel_tol=1e-8,
-                abs_tol=1e-8
-            ):
-                logger.error(
-                    "Position allocation mismatch: %s",
-                    symbol
-                )
-                return False
+            quantity = float(position["quantity"])
+            entry_price = float(position["entry_price"])
+            allocation = float(position["allocation"])
+            entry_fee = float(position["entry_fee"])
 
-            exit_price = (
-                price * (1.0 - self._slippage())
-            )
+            exit_price = price * (1.0 - self._slippage())
 
             if (
                 not valid_number(exit_price)
@@ -482,34 +416,19 @@ class PaperTrader:
             ):
                 return False
 
-            exit_value = (
-                quantity * exit_price
-            )
+            exit_value = quantity * exit_price
+            exit_fee = exit_value * float(FEE_RATE)
+            gross_pnl = exit_value - allocation
 
-            exit_fee = (
-                exit_value * float(FEE_RATE)
-            )
-
-            gross_pnl = (
-                exit_value - allocation
-            )
-
-            net_pnl = (
-                gross_pnl
-                - entry_fee
-                - exit_fee
-            )
+            net_pnl = gross_pnl - entry_fee - exit_fee
 
             new_balance = (
                 self.balance
-                + allocation
-                + gross_pnl
+                + exit_value
                 - exit_fee
             )
 
-            new_realized = (
-                self.realized_pnl + net_pnl
-            )
+            new_realized = self.realized_pnl + net_pnl
 
             calculated_values = (
                 exit_value,
@@ -517,17 +436,17 @@ class PaperTrader:
                 gross_pnl,
                 net_pnl,
                 new_balance,
-                new_realized
+                new_realized,
             )
 
-            if not all(
-                valid_number(value)
-                for value in calculated_values
-            ):
+            if not all(valid_number(v) for v in calculated_values):
                 return False
 
             if new_balance < 0:
                 return False
+
+            if not isinstance(reason, str):
+                reason = "Position closed"
 
             trade = {
                 "quantity": quantity,
@@ -537,7 +456,7 @@ class PaperTrader:
                 "net_pnl": net_pnl,
                 "entry_fee": entry_fee,
                 "exit_fee": exit_fee,
-                "reason": str(reason)[:200]
+                "reason": reason[:200],
             }
 
             try:
@@ -545,13 +464,12 @@ class PaperTrader:
                     symbol,
                     trade,
                     new_balance,
-                    new_realized
+                    new_realized,
                 )
-
             except Exception:
                 logger.exception(
                     "Database error while closing %s",
-                    symbol
+                    symbol,
                 )
                 return False
 
@@ -560,135 +478,128 @@ class PaperTrader:
 
             self.balance = new_balance
             self.realized_pnl = new_realized
-
             self.live_marks.pop(symbol, None)
 
             logger.info(
                 "Paper position closed: %s | Net PnL: %.6f",
                 symbol,
-                net_pnl
+                net_pnl,
             )
 
             return True
 
     async def update_positions(self, market):
 
-        try:
-            positions = self._get_positions()
-
-        except Exception:
-            logger.exception(
-                "Unable to load positions for update"
-            )
-            return
-
-        for position in positions:
-
-            symbol = position.get("symbol")
-
-            if not isinstance(symbol, str) or not symbol:
-                continue
+        async with self.update_lock:
 
             try:
-                ticker = await market.get_ticker(symbol)
-
-                if not isinstance(ticker, dict):
-                    continue
-
-                price = ticker.get("price")
-
-                if (
-                    not valid_number(price)
-                    or float(price) <= 0
-                ):
-                    continue
-
-                price = float(price)
-
-                quantity = safe_float(
-                    position.get("quantity")
-                )
-
-                allocation = safe_float(
-                    position.get("allocation")
-                )
-
-                entry_price = safe_float(
-                    position.get("entry_price")
-                )
-
-                entry_fee = safe_float(
-                    position.get("entry_fee")
-                )
-
-                if (
-                    quantity <= 0
-                    or allocation <= 0
-                    or entry_price <= 0
-                    or entry_fee < 0
-                ):
-                    continue
-
-                current_value = (
-                    quantity * price
-                )
-
-                estimated_exit_fee = (
-                    current_value * float(FEE_RATE)
-                )
-
-                unrealized_pnl = (
-                    current_value
-                    - allocation
-                    - entry_fee
-                    - estimated_exit_fee
-                )
-
-                if not valid_number(unrealized_pnl):
-                    continue
-
-                with self.lock:
-                    self.live_marks[symbol] = {
-                        "current_price": price,
-                        "unrealized_pnl": unrealized_pnl
-                    }
-
-                stop_loss = safe_float(
-                    position.get("stop_loss")
-                )
-
-                take_profit = safe_float(
-                    position.get("take_profit")
-                )
-
-                if (
-                    stop_loss > 0
-                    and price <= stop_loss
-                ):
-                    self.close_position(
-                        symbol,
-                        price,
-                        "Stop loss"
-                    )
-
-                elif (
-                    take_profit > 0
-                    and price >= take_profit
-                ):
-                    self.close_position(
-                        symbol,
-                        price,
-                        "Take profit"
-                    )
-
-            except asyncio.CancelledError:
-                raise
-
+                positions = self._get_positions()
             except Exception:
                 logger.exception(
-                    "Position update failed for %s",
-                    symbol
+                    "Unable to load positions for update"
                 )
+                return
+
+            for position in positions:
+
+                symbol = position.get("symbol")
+
+                if (
+                    not isinstance(symbol, str)
+                    or not symbol.strip()
+                    or not self._validate_position(position)
+                ):
+                    logger.warning(
+                        "Skipping invalid position during update"
+                    )
+                    continue
+
+                symbol = symbol.strip().upper()
+
+                try:
+                    ticker = await market.get_ticker(symbol)
+
+                    if not isinstance(ticker, dict):
+                        continue
+
+                    raw_price = ticker.get("price")
+
+                    if (
+                        not valid_number(raw_price)
+                        or float(raw_price) <= 0
+                    ):
+                        continue
+
+                    price = float(raw_price)
+
+                    quantity = float(position["quantity"])
+                    allocation = float(position["allocation"])
+                    entry_fee = float(position["entry_fee"])
+
+                    current_value = quantity * price
+                    estimated_exit_fee = (
+                        current_value * float(FEE_RATE)
+                    )
+
+                    unrealized_pnl = (
+                        current_value
+                        - allocation
+                        - entry_fee
+                        - estimated_exit_fee
+                    )
+
+                    if not all(valid_number(v) for v in (
+                        current_value,
+                        estimated_exit_fee,
+                        unrealized_pnl,
+                    )):
+                        continue
+
+                    # Do not add a mark for a position that
+                    # has already been closed while awaiting the ticker.
+                    with self.lock:
+                        current_positions = self._get_positions()
+
+                        still_open = any(
+                            str(p.get("symbol", "")).strip().upper()
+                            == symbol
+                            for p in current_positions
+                        )
+
+                        if not still_open:
+                            self.live_marks.pop(symbol, None)
+                            continue
+
+                        self.live_marks[symbol] = {
+                            "current_price": price,
+                            "unrealized_pnl": unrealized_pnl,
+                        }
+
+                    stop_loss = float(position.get("stop_loss", 0) or 0)
+                    take_profit = float(position.get("take_profit", 0) or 0)
+
+                    if stop_loss > 0 and price <= stop_loss:
+                        self.close_position(
+                            symbol,
+                            price,
+                            "Stop loss",
+                        )
+
+                    elif take_profit > 0 and price >= take_profit:
+                        self.close_position(
+                            symbol,
+                            price,
+                            "Take profit",
+                        )
+
+                except asyncio.CancelledError:
+                    raise
+
+                except Exception:
+                    logger.exception(
+                        "Position update failed for %s",
+                        symbol,
+                    )
 
     def get_summary(self):
 
@@ -705,42 +616,24 @@ class PaperTrader:
 
             for position in positions:
 
-                symbol = position.get("symbol")
-
-                allocation = safe_float(
-                    position.get("allocation")
-                )
-
-                quantity = safe_float(
-                    position.get("quantity")
-                )
-
-                entry_price = safe_float(
-                    position.get("entry_price")
-                )
-
-                entry_fee = safe_float(
-                    position.get("entry_fee")
-                )
-
-                if (
-                    quantity <= 0
-                    or allocation <= 0
-                    or entry_price <= 0
-                    or entry_fee < 0
-                ):
-                    logger.warning(
-                        "Skipping invalid position in summary: %s",
-                        symbol
+                if not self._validate_position(position):
+                    raise RuntimeError(
+                        "Invalid position data; refusing inaccurate summary"
                     )
-                    continue
+
+                symbol = position["symbol"].strip().upper()
+
+                quantity = float(position["quantity"])
+                allocation = float(position["allocation"])
+                entry_price = float(position["entry_price"])
+                entry_fee = float(position["entry_fee"])
 
                 mark = self.live_marks.get(symbol)
 
                 if isinstance(mark, dict):
                     current_price = safe_float(
                         mark.get("current_price"),
-                        entry_price
+                        entry_price,
                     )
                 else:
                     current_price = entry_price
@@ -748,13 +641,8 @@ class PaperTrader:
                 if current_price <= 0:
                     current_price = entry_price
 
-                current_value = (
-                    quantity * current_price
-                )
-
-                exit_fee = (
-                    current_value * float(FEE_RATE)
-                )
+                current_value = quantity * current_price
+                exit_fee = current_value * float(FEE_RATE)
 
                 position_unrealized = (
                     current_value
@@ -769,18 +657,10 @@ class PaperTrader:
                 unrealized_pnl += position_unrealized
 
                 display_position = dict(position)
+                display_position["current_price"] = current_price
+                display_position["unrealized_pnl"] = position_unrealized
 
-                display_position["current_price"] = (
-                    current_price
-                )
-
-                display_position["unrealized_pnl"] = (
-                    position_unrealized
-                )
-
-                display_positions.append(
-                    display_position
-                )
+                display_positions.append(display_position)
 
             equity = (
                 self.balance
@@ -788,10 +668,21 @@ class PaperTrader:
                 - estimated_exit_fees
             )
 
+            if not all(valid_number(v) for v in (
+                reserved,
+                market_value,
+                estimated_exit_fees,
+                unrealized_pnl,
+                equity,
+            )):
+                raise RuntimeError("Invalid paper account summary")
+
             trades = self.db.get_recent_trades(500)
 
             if not isinstance(trades, list):
-                trades = []
+                raise RuntimeError(
+                    "Invalid trades returned by database"
+                )
 
             wins = 0
             total = 0
@@ -803,7 +694,7 @@ class PaperTrader:
 
                 pnl = safe_float(
                     trade.get("net_pnl"),
-                    None
+                    None,
                 )
 
                 if pnl is None:
@@ -827,5 +718,5 @@ class PaperTrader:
                 "unrealized_pnl": unrealized_pnl,
                 "reserved": reserved,
                 "positions": display_positions,
-                "win_rate": win_rate
+                "win_rate": win_rate,
             }
