@@ -18,7 +18,6 @@ logger = logging.getLogger(__name__)
 
 
 def valid_number(value):
-
     try:
         return math.isfinite(float(value))
     except (TypeError, ValueError, OverflowError):
@@ -42,13 +41,17 @@ class PaperTrader:
             account.get("realized_pnl", 0)
         )
 
+        self.wins = int(account.get("wins", 0))
+        self.losses = int(account.get("losses", 0))
+
+        # أسعار السوق الحية لا تُحفظ في قاعدة البيانات
+        self.live_marks = {}
+
     def _get_positions(self):
 
         positions = self.db.get_positions()
 
-        return positions if isinstance(
-            positions, list
-        ) else []
+        return positions if isinstance(positions, list) else []
 
     def _slippage(self):
 
@@ -72,16 +75,7 @@ class PaperTrader:
 
             positions = self._get_positions()
 
-            if any(
-                p.get("symbol") == symbol
-                for p in positions
-            ):
-
-                logger.info(
-                    "Position already exists for %s",
-                    symbol
-                )
-
+            if any(p.get("symbol") == symbol for p in positions):
                 return False
 
             if len(positions) >= MAX_OPEN_POSITIONS:
@@ -92,21 +86,11 @@ class PaperTrader:
             if stop_distance <= 0:
                 return False
 
-            risk_budget = (
-                self.balance * RISK_PER_TRADE_PCT
-            )
+            risk_budget = self.balance * RISK_PER_TRADE_PCT
+            max_allocation = self.balance * MAX_ALLOCATION_PCT
 
-            max_allocation = (
-                self.balance * MAX_ALLOCATION_PCT
-            )
-
-            quantity_by_risk = (
-                risk_budget / stop_distance
-            )
-
-            quantity_by_allocation = (
-                max_allocation / price
-            )
+            quantity_by_risk = risk_budget / stop_distance
+            quantity_by_allocation = max_allocation / price
 
             quantity = min(
                 quantity_by_risk,
@@ -116,22 +100,16 @@ class PaperTrader:
             if not valid_number(quantity) or quantity <= 0:
                 return False
 
-            entry_price = price * (
-                1 + self._slippage()
-            )
+            entry_price = price * (1 + self._slippage())
 
             allocation = quantity * entry_price
-
             entry_fee = allocation * FEE_RATE
-
             total_cost = allocation + entry_fee
 
             if total_cost > self.balance:
                 return False
 
-            stop_loss = (
-                entry_price - stop_distance
-            )
+            stop_loss = entry_price - stop_distance
 
             take_profit = (
                 entry_price
@@ -147,17 +125,18 @@ class PaperTrader:
                 "symbol": symbol,
                 "quantity": quantity,
                 "entry_price": entry_price,
-                "current_price": entry_price,
-                "allocation": allocation,
-                "entry_fee": entry_fee,
                 "stop_loss": stop_loss,
                 "take_profit": take_profit,
-                "unrealized_pnl": 0.0
+                "allocation": allocation,
+                "entry_fee": entry_fee
             }
 
             success = self.db.open_position_atomic(
                 position,
-                new_balance
+                new_balance,
+                self.realized_pnl,
+                self.wins,
+                self.losses
             )
 
             if not success:
@@ -165,19 +144,16 @@ class PaperTrader:
 
             self.balance = new_balance
 
-            logger.info(
-                "Paper position opened: %s",
-                symbol
-            )
+            self.live_marks[symbol] = {
+                "current_price": entry_price,
+                "unrealized_pnl": 0.0
+            }
+
+            logger.info("Paper position opened: %s", symbol)
 
             return True
 
-    def close_position(
-        self,
-        symbol,
-        price,
-        reason=""
-    ):
+    def close_position(self, symbol, price, reason=""):
 
         with self.lock:
 
@@ -192,74 +168,45 @@ class PaperTrader:
             positions = self._get_positions()
 
             position = next(
-                (
-                    p for p in positions
-                    if p.get("symbol") == symbol
-                ),
+                (p for p in positions if p.get("symbol") == symbol),
                 None
             )
 
             if not position:
                 return False
 
-            quantity = float(
-                position.get("quantity", 0)
-            )
-
-            entry_price = float(
-                position.get("entry_price", 0)
-            )
-
-            allocation = float(
-                position.get("allocation", 0)
-            )
-
-            entry_fee = float(
-                position.get("entry_fee", 0)
-            )
+            quantity = float(position.get("quantity", 0))
+            entry_price = float(position.get("entry_price", 0))
+            allocation = float(position.get("allocation", 0))
+            entry_fee = float(position.get("entry_fee", 0))
 
             if quantity <= 0 or entry_price <= 0:
                 return False
 
-            exit_price = price * (
-                1 - self._slippage()
-            )
+            exit_price = price * (1 - self._slippage())
 
             exit_value = quantity * exit_price
-
             exit_fee = exit_value * FEE_RATE
 
-            gross_pnl = (
-                exit_value - allocation
-            )
+            gross_pnl = exit_value - allocation
 
-            net_pnl = (
-                gross_pnl - entry_fee - exit_fee
-            )
+            net_pnl = gross_pnl - entry_fee - exit_fee
 
             returned_balance = (
-                allocation
-                + gross_pnl
-                - exit_fee
+                allocation + gross_pnl - exit_fee
             )
 
-            new_balance = (
-                self.balance + returned_balance
-            )
+            new_balance = self.balance + returned_balance
+            new_realized = self.realized_pnl + net_pnl
 
-            new_realized_pnl = (
-                self.realized_pnl + net_pnl
-            )
+            new_wins = self.wins + (1 if net_pnl > 0 else 0)
+            new_losses = self.losses + (1 if net_pnl <= 0 else 0)
 
             trade = {
                 "symbol": symbol,
-                "quantity": quantity,
                 "entry_price": entry_price,
                 "exit_price": exit_price,
-                "allocation": allocation,
-                "entry_fee": entry_fee,
-                "exit_fee": exit_fee,
-                "gross_pnl": gross_pnl,
+                "quantity": quantity,
                 "net_pnl": net_pnl,
                 "reason": str(reason)[:200]
             }
@@ -268,14 +215,20 @@ class PaperTrader:
                 symbol,
                 trade,
                 new_balance,
-                new_realized_pnl
+                new_realized,
+                new_wins,
+                new_losses
             )
 
             if not success:
                 return False
 
             self.balance = new_balance
-            self.realized_pnl = new_realized_pnl
+            self.realized_pnl = new_realized
+            self.wins = new_wins
+            self.losses = new_losses
+
+            self.live_marks.pop(symbol, None)
 
             logger.info(
                 "Paper position closed: %s | PnL: %.4f",
@@ -284,33 +237,6 @@ class PaperTrader:
             )
 
             return True
-
-    def update_positions(self, market):
-
-        with self.lock:
-
-            positions = self._get_positions()
-
-            for position in positions:
-
-                symbol = position.get("symbol")
-
-                if not symbol:
-                    continue
-
-                try:
-
-                    ticker = awaitable = None
-
-                    # Market data is asynchronous.
-                    # This method is asynchronous below.
-
-                except Exception:
-
-                    logger.exception(
-                        "Position update failed for %s",
-                        symbol
-                    )
 
     async def update_positions(self, market):
 
@@ -340,26 +266,14 @@ class PaperTrader:
                 if price <= 0:
                     continue
 
-                quantity = float(
-                    position.get("quantity", 0)
-                )
+                quantity = float(position.get("quantity", 0))
+                allocation = float(position.get("allocation", 0))
+                entry_fee = float(position.get("entry_fee", 0))
 
-                entry_price = float(
-                    position.get("entry_price", 0)
-                )
-
-                if quantity <= 0 or entry_price <= 0:
+                if quantity <= 0:
                     continue
 
                 current_value = quantity * price
-
-                allocation = float(
-                    position.get("allocation", 0)
-                )
-
-                entry_fee = float(
-                    position.get("entry_fee", 0)
-                )
 
                 unrealized_pnl = (
                     current_value
@@ -368,17 +282,13 @@ class PaperTrader:
                     - current_value * FEE_RATE
                 )
 
-                # Update the position in memory only.
-                position["current_price"] = price
-                position["unrealized_pnl"] = unrealized_pnl
+                self.live_marks[symbol] = {
+                    "current_price": price,
+                    "unrealized_pnl": unrealized_pnl
+                }
 
-                stop_loss = float(
-                    position.get("stop_loss", 0)
-                )
-
-                take_profit = float(
-                    position.get("take_profit", 0)
-                )
+                stop_loss = float(position.get("stop_loss", 0))
+                take_profit = float(position.get("take_profit", 0))
 
                 if stop_loss > 0 and price <= stop_loss:
 
@@ -405,49 +315,55 @@ class PaperTrader:
 
     def get_summary(self):
 
-        positions = self._get_positions()
+        with self.lock:
 
-        reserved = sum(
-            float(p.get("allocation", 0))
-            for p in positions
-            if valid_number(p.get("allocation", 0))
-        )
+            positions = self._get_positions()
 
-        unrealized_pnl = sum(
-            float(p.get("unrealized_pnl", 0))
-            for p in positions
-            if valid_number(p.get("unrealized_pnl", 0))
-        )
+            for position in positions:
 
-        equity = (
-            self.balance
-            + reserved
-            + unrealized_pnl
-        )
+                symbol = position.get("symbol")
 
-        trades = self.db.get_recent_trades(1000)
+                mark = self.live_marks.get(symbol)
 
-        closed_count = len(trades)
+                if mark:
 
-        winning_trades = sum(
-            1
-            for trade in trades
-            if valid_number(trade.get("net_pnl"))
-            and float(trade["net_pnl"]) > 0
-        )
+                    position["current_price"] = mark["current_price"]
+                    position["unrealized_pnl"] = mark["unrealized_pnl"]
 
-        win_rate = (
-            winning_trades / closed_count * 100
-            if closed_count
-            else 0.0
-        )
+                else:
 
-        return {
-            "balance": self.balance,
-            "equity": equity,
-            "realized_pnl": self.realized_pnl,
-            "unrealized_pnl": unrealized_pnl,
-            "reserved": reserved,
-            "positions": positions,
-            "win_rate": win_rate
-        }
+                    position["current_price"] = position.get(
+                        "entry_price", 0
+                    )
+
+                    position["unrealized_pnl"] = 0.0
+
+            reserved = sum(
+                float(p.get("allocation", 0))
+                for p in positions
+            )
+
+            unrealized_pnl = sum(
+                float(p.get("unrealized_pnl", 0))
+                for p in positions
+            )
+
+            equity = self.balance + reserved + unrealized_pnl
+
+            total_closed = self.wins + self.losses
+
+            win_rate = (
+                self.wins / total_closed * 100
+                if total_closed
+                else 0.0
+            )
+
+            return {
+                "balance": self.balance,
+                "equity": equity,
+                "realized_pnl": self.realized_pnl,
+                "unrealized_pnl": unrealized_pnl,
+                "reserved": reserved,
+                "positions": positions,
+                "win_rate": win_rate
+            }
