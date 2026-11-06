@@ -177,8 +177,6 @@ def get_controller_components(controller):
             "Paper trader is missing"
         )
 
-    # Support both controller.db and engine.db.
-
     db = getattr(
         controller,
         "db",
@@ -241,10 +239,12 @@ def get_dashboard(controller):
 
     summary = safe_call(
         trader.get_summary,
-        {},
+        None,
     )
 
-    if not isinstance(summary, dict):
+    summary_valid = isinstance(summary, dict)
+
+    if not summary_valid:
         summary = {}
 
     positions_data = summary.get(
@@ -256,30 +256,40 @@ def get_dashboard(controller):
         positions_data = []
 
     positions_data = [
-        p for p in positions_data
-        if isinstance(p, dict)
+        position
+        for position in positions_data
+        if isinstance(position, dict)
     ]
 
     # --------------------------------------------------------
     # DATABASE DATA
     # --------------------------------------------------------
 
+    database_error = False
+
     if db is not None:
 
         decisions = safe_call(
             lambda: db.get_recent_decisions(15),
-            [],
+            None,
         )
 
         trades = safe_call(
             lambda: db.get_recent_trades(15),
-            [],
+            None,
         )
 
         events = safe_call(
             lambda: db.get_recent_events(20),
-            [],
+            None,
         )
+
+        if (
+            decisions is None
+            or trades is None
+            or events is None
+        ):
+            database_error = True
 
     else:
 
@@ -290,6 +300,8 @@ def get_dashboard(controller):
         decisions = []
         trades = []
         events = []
+
+        database_error = True
 
     decisions = safe_rows(decisions)
     trades = safe_rows(trades)
@@ -340,6 +352,20 @@ def get_dashboard(controller):
         ) or "No system errors",
         500,
     )
+
+    if not summary_valid:
+
+        error = (
+            "Account summary unavailable. "
+            "Check paper trader and database logs."
+        )
+
+    elif database_error:
+
+        error = (
+            "Database data is partially unavailable. "
+            + error
+        )
 
     # --------------------------------------------------------
     # POSITIONS
@@ -645,6 +671,7 @@ async def force_scan(controller):
                 detail = result.get("message")
 
                 if detail:
+
                     message += " " + safe_text(
                         detail,
                         250
@@ -957,21 +984,25 @@ def build_dashboard(controller):
         ]
 
         # ----------------------------------------------------
-        # REFRESH
+        # CALLBACKS
         # ----------------------------------------------------
 
+        async def run_manual_scan():
+
+            return await force_scan(controller)
+
+        def refresh_dashboard():
+
+            return get_dashboard(controller)
+
         refresh_button.click(
-            fn=lambda: get_dashboard(controller),
+            fn=refresh_dashboard,
             inputs=None,
             outputs=outputs,
         )
 
-        # ----------------------------------------------------
-        # MANUAL SCAN
-        # ----------------------------------------------------
-
         scan_button.click(
-            fn=lambda: force_scan(controller),
+            fn=run_manual_scan,
             inputs=None,
             outputs=[
                 scan_message,
@@ -988,7 +1019,7 @@ def build_dashboard(controller):
         )
 
         timer.tick(
-            fn=lambda: get_dashboard(controller),
+            fn=refresh_dashboard,
             inputs=None,
             outputs=outputs,
         )
@@ -998,7 +1029,7 @@ def build_dashboard(controller):
         # ----------------------------------------------------
 
         demo.load(
-            fn=lambda: get_dashboard(controller),
+            fn=refresh_dashboard,
             inputs=None,
             outputs=outputs,
         )
