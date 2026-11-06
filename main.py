@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 
 from contextlib import asynccontextmanager
@@ -59,7 +60,6 @@ if not isinstance(HOST, str) or not HOST.strip():
         "HOST must be a non-empty string"
     )
 
-
 SERVER_HOST = HOST.strip()
 
 
@@ -71,7 +71,7 @@ def get_server_port():
         or not 1 <= PORT <= 65535
     ):
         raise ValueError(
-            "PORT must be an integer between 1 and 65535"
+            "PORT must be between 1 and 65535"
         )
 
     return PORT
@@ -122,8 +122,6 @@ scanner_task = None
 
 shutdown_started = False
 
-application_started_once = False
-
 startup_completed = False
 
 application_state = "CREATED"
@@ -140,7 +138,6 @@ def safe_count(value):
 
     try:
         result = int(value)
-
         return max(0, result)
 
     except (TypeError, ValueError, OverflowError):
@@ -157,7 +154,6 @@ def safe_status_text(
         return default
 
     try:
-
         result = str(value).strip()
 
         return result[:limit] if result else default
@@ -196,19 +192,16 @@ async def stop_scanner():
         task.cancel()
 
     try:
-
         await task
 
     except asyncio.CancelledError:
-
         logger.info(
-            "Scanner task cancelled successfully"
+            "Scanner task stopped"
         )
 
     except Exception:
-
         logger.exception(
-            "Scanner task terminated with an error"
+            "Scanner task failed during shutdown"
         )
 
 
@@ -225,7 +218,7 @@ async def shutdown_component(
 
         result = close_function()
 
-        if asyncio.iscoroutine(result):
+        if inspect.isawaitable(result):
             await result
 
         logger.info(
@@ -235,7 +228,10 @@ async def shutdown_component(
 
     except asyncio.CancelledError:
 
-        raise
+        logger.warning(
+            "%s shutdown was cancelled",
+            name,
+        )
 
     except Exception:
 
@@ -270,34 +266,21 @@ async def shutdown_components():
     # --------------------------------------------------------
 
     try:
-
         engine.running = False
 
     except Exception:
-
         logger.exception(
-            "Could not stop engine flag"
+            "Could not stop engine"
         )
 
     # --------------------------------------------------------
     # STOP SCANNER
     # --------------------------------------------------------
 
-    try:
-
-        await stop_scanner()
-
-    except asyncio.CancelledError:
-
-        logger.warning(
-            "Scanner shutdown was cancelled"
-        )
-
-    except Exception:
-
-        logger.exception(
-            "Scanner shutdown failed"
-        )
+    await shutdown_component(
+        "Scanner",
+        stop_scanner,
+    )
 
     # --------------------------------------------------------
     # STOP TELEGRAM
@@ -321,19 +304,10 @@ async def shutdown_components():
     # CLOSE DATABASE LAST
     # --------------------------------------------------------
 
-    try:
-
-        db.close()
-
-        logger.info(
-            "Database shutdown completed"
-        )
-
-    except Exception:
-
-        logger.exception(
-            "Database shutdown failed"
-        )
+    await shutdown_component(
+        "Database",
+        db.close,
+    )
 
     application_state = "STOPPED"
 
@@ -351,22 +325,12 @@ async def lifespan(app: FastAPI):
 
     global scanner_task
     global shutdown_started
-    global application_started_once
     global startup_completed
     global application_state
 
-    if application_started_once:
-
-        raise RuntimeError(
-            "This AI QUANT application instance "
-            "cannot be restarted after shutdown."
-        )
-
-    application_started_once = True
-
     shutdown_started = False
-
     startup_completed = False
+    scanner_task = None
 
     application_state = "STARTING"
 
@@ -385,9 +349,8 @@ async def lifespan(app: FastAPI):
         await engine.start()
 
         if not getattr(engine, "running", False):
-
             raise RuntimeError(
-                "Trading engine did not enter running state"
+                "Trading engine did not start"
             )
 
         # ----------------------------------------------------
@@ -408,17 +371,16 @@ async def lifespan(app: FastAPI):
             await telegram.start()
 
             logger.info(
-                "Telegram startup sequence completed"
+                "Telegram startup completed"
             )
 
         except asyncio.CancelledError:
-
             raise
 
         except Exception:
 
             logger.exception(
-                "Telegram startup failed; application will continue"
+                "Telegram startup failed; continuing without Telegram"
             )
 
         # ----------------------------------------------------
@@ -426,7 +388,6 @@ async def lifespan(app: FastAPI):
         # ----------------------------------------------------
 
         startup_completed = True
-
         application_state = "RUNNING"
 
         logger.info(
@@ -435,12 +396,22 @@ async def lifespan(app: FastAPI):
 
         yield
 
-    except BaseException:
+    except asyncio.CancelledError:
+
+        application_state = "FAILED"
+
+        logger.warning(
+            "Application startup or lifespan cancelled"
+        )
+
+        raise
+
+    except Exception:
 
         application_state = "FAILED"
 
         logger.exception(
-            "Application lifecycle interrupted"
+            "Application lifecycle failed"
         )
 
         raise
@@ -486,22 +457,12 @@ async def health():
     )
 
     return {
-        "status": (
-            "ok"
-            if healthy
-            else "degraded"
-        ),
-
+        "status": "ok" if healthy else "degraded",
         "application": APP_NAME,
-
         "version": APP_VERSION,
-
         "application_state": application_state,
-
         "running": engine_running,
-
         "scanner_active": scanner_active,
-
         "paper_trading_only": True,
     }
 
@@ -516,7 +477,7 @@ async def api_status():
     """
     Public-safe status endpoint.
 
-    Financial account details, balances and open positions
+    Account balances, equity and open positions
     are intentionally not exposed.
     """
 
@@ -580,7 +541,6 @@ async def api_status():
 
             "last_scan": last_scan,
 
-            # Do not expose internal error details publicly.
             "has_error": bool(last_error),
 
             "scan_stats": {
