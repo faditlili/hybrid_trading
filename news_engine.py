@@ -31,8 +31,12 @@ class NewsEngine:
 
         self.lock = asyncio.Lock()
 
-        self.last_fetch = 0
-        self.last_attempt = 0
+        # Prevent concurrent get_news calls from
+        # triggering duplicate refreshes.
+        self.refresh_lock = asyncio.Lock()
+
+        self.last_fetch = 0.0
+        self.last_attempt = 0.0
 
         self.fetch_interval = 300
 
@@ -92,7 +96,6 @@ class NewsEngine:
     async def close(self):
 
         if self.session and not self.session.closed:
-
             await self.session.close()
 
         self.session = None
@@ -107,7 +110,6 @@ class NewsEngine:
             return ""
 
         text = str(text)
-
         text = unescape(text)
 
         text = re.sub(
@@ -181,7 +183,6 @@ class NewsEngine:
                 date = parsedate_to_datetime(value)
 
             if date.tzinfo is None:
-
                 date = date.replace(
                     tzinfo=timezone.utc
                 )
@@ -202,13 +203,18 @@ class NewsEngine:
     def date_timestamp(value):
 
         if not value:
-            return 0
+            return 0.0
 
         try:
 
             date = datetime.fromisoformat(
                 value.replace("Z", "+00:00")
             )
+
+            if date.tzinfo is None:
+                date = date.replace(
+                    tzinfo=timezone.utc
+                )
 
             return date.timestamp()
 
@@ -218,7 +224,7 @@ class NewsEngine:
             OverflowError
         ):
 
-            return 0
+            return 0.0
 
     @staticmethod
     def get_child(element, names):
@@ -256,6 +262,9 @@ class NewsEngine:
     @staticmethod
     def normalize_title(title):
 
+        if not isinstance(title, str):
+            return ""
+
         title = title.lower()
 
         title = re.sub(
@@ -275,7 +284,6 @@ class NewsEngine:
     def parse_feed(self, root, source_url):
 
         news = []
-
         items = []
 
         for element in root.iter():
@@ -286,7 +294,6 @@ class NewsEngine:
             tag = element.tag.split("}")[-1].lower()
 
             if tag in ("item", "entry"):
-
                 items.append(element)
 
         for item in items[:self.max_items_per_feed]:
@@ -315,23 +322,24 @@ class NewsEngine:
 
                 tag = child.tag.split("}")[-1].lower()
 
-                if tag == "link":
+                if tag != "link":
+                    continue
 
-                    rel = child.attrib.get(
-                        "rel",
-                        "alternate"
-                    )
+                rel = child.attrib.get(
+                    "rel",
+                    "alternate"
+                )
 
-                    if rel not in ("alternate", ""):
-                        continue
+                if rel not in ("alternate", ""):
+                    continue
 
-                    link = (
-                        child.attrib.get("href")
-                        or self.get_element_text(child)
-                    )
+                link = (
+                    child.attrib.get("href")
+                    or self.get_element_text(child)
+                )
 
-                    if link:
-                        break
+                if link:
+                    break
 
             link = self.valid_url(link)
 
@@ -346,7 +354,9 @@ class NewsEngine:
             )
 
             description = self.clean_text(
-                self.get_element_text(description_element)
+                self.get_element_text(
+                    description_element
+                )
             )
 
             date_element = self.get_child(
@@ -389,7 +399,6 @@ class NewsEngine:
             not self.session
             or self.session.closed
         ):
-
             return False, []
 
         try:
@@ -440,17 +449,18 @@ class NewsEngine:
                     errors="replace"
                 )
 
+                final_url = str(response.url)
+
             root = ET.fromstring(content)
 
             news = self.parse_feed(
                 root,
-                url
+                final_url
             )
 
             return True, news
 
         except asyncio.CancelledError:
-
             raise
 
         except asyncio.TimeoutError:
@@ -490,7 +500,7 @@ class NewsEngine:
             url
         )
 
-        return news
+        return news if success else []
 
     async def fetch_all(self):
 
@@ -520,16 +530,17 @@ class NewsEngine:
                 )
 
             except asyncio.CancelledError:
-
                 raise
 
             combined = []
-
             successful_sources = 0
 
             for result in results:
 
-                if isinstance(result, asyncio.CancelledError):
+                if isinstance(
+                    result,
+                    asyncio.CancelledError
+                ):
                     raise result
 
                 if isinstance(result, Exception):
@@ -544,13 +555,10 @@ class NewsEngine:
                 success, news = result
 
                 if success:
-
                     successful_sources += 1
-
                     combined.extend(news)
 
-            # Preserve old news if every source fails.
-
+            # Preserve previous news if all feeds fail.
             if successful_sources == 0:
 
                 logger.warning(
@@ -564,10 +572,7 @@ class NewsEngine:
 
             for item in combined:
 
-                title = item.get(
-                    "title",
-                    ""
-                )
+                title = item.get("title", "")
 
                 normalized_title = self.normalize_title(
                     title
@@ -576,26 +581,23 @@ class NewsEngine:
                 if not normalized_title:
                     continue
 
-                key = normalized_title
-
-                existing = unique.get(key)
+                existing = unique.get(
+                    normalized_title
+                )
 
                 if existing is None:
 
-                    unique[key] = item
+                    unique[normalized_title] = item
 
                 elif (
                     not existing.get("description")
                     and item.get("description")
                 ):
 
-                    unique[key] = item
+                    unique[normalized_title] = item
 
-            news_list = list(
-                unique.values()
-            )
+            news_list = list(unique.values())
 
-            # Sort newest first.
             news_list.sort(
                 key=lambda item: self.date_timestamp(
                     item.get("published", "")
@@ -608,6 +610,7 @@ class NewsEngine:
             ]
 
             self.last_fetch = time.monotonic()
+            self.available = True
 
             logger.info(
                 "News updated: %s items from %s sources",
@@ -623,7 +626,6 @@ class NewsEngine:
             not isinstance(limit, int)
             or isinstance(limit, bool)
         ):
-
             limit = 20
 
         limit = max(
@@ -631,26 +633,25 @@ class NewsEngine:
             min(limit, self.max_total_items)
         )
 
-        now = time.monotonic()
+        # Serialize callers and recheck freshness after
+        # acquiring the lock. This prevents duplicate fetches.
+        async with self.refresh_lock:
 
-        should_fetch = (
+            now = time.monotonic()
 
-            not self.latest_news
+            should_fetch = (
+                not self.latest_news
+                or now - self.last_fetch >= self.fetch_interval
+            )
 
-            or now - self.last_fetch >= self.fetch_interval
+            if should_fetch:
 
-        )
+                retry_blocked = (
+                    self.latest_news
+                    and now - self.last_attempt < 30
+                )
 
-        # Avoid repeatedly requesting failed sources.
-        if should_fetch:
+                if not retry_blocked:
+                    await self.fetch_all()
 
-            if (
-                self.latest_news
-                and now - self.last_attempt < 30
-            ):
-
-                return self.latest_news[:limit]
-
-            await self.fetch_all()
-
-        return self.latest_news[:limit]
+            return self.latest_news[:limit]
