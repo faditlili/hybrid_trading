@@ -13,47 +13,36 @@ AI_APPROVAL_BONUS = 15
 VALID_MARKET_REGIMES = {
     "BULLISH",
     "NOT_BULLISH",
-    "UNKNOWN"
+    "UNKNOWN",
 }
 
 VALID_AI_VOTES = {
     "BUY",
     "SELL",
     "HOLD",
-    "UNAVAILABLE"
+    "UNAVAILABLE",
 }
 
 
 def valid_number(value):
-
     if isinstance(value, bool):
         return False
 
     try:
         return math.isfinite(float(value))
-
-    except (
-        TypeError,
-        ValueError,
-        OverflowError
-    ):
+    except (TypeError, ValueError, OverflowError):
         return False
 
 
 def valid_reasons(value):
-
     if not isinstance(value, (list, tuple)):
         return []
 
     reasons = []
 
     for reason in value:
-
         if isinstance(reason, str) and reason.strip():
-
-            reasons.append(
-                reason.strip()[:200]
-            )
+            reasons.append(reason.strip()[:200])
 
         if len(reasons) >= 30:
             break
@@ -62,35 +51,34 @@ def valid_reasons(value):
 
 
 def invalid_result(reason):
-
     return {
         "score": 0,
         "reasons": [str(reason)[:200]],
-        "valid": False
+        "valid": False,
     }
 
 
-def calculate_technical_score(
-    indicators,
-    market_regime
-):
-
-    if not isinstance(indicators, dict):
-        return invalid_result("Invalid indicators")
-
+def normalize_market_regime(market_regime):
     if not isinstance(market_regime, str):
-        market_regime = "UNKNOWN"
+        return "UNKNOWN"
 
     market_regime = market_regime.strip().upper()
 
     if market_regime not in VALID_MARKET_REGIMES:
-        market_regime = "UNKNOWN"
+        return "UNKNOWN"
+
+    return market_regime
+
+
+def calculate_technical_score(indicators, market_regime):
+
+    if not isinstance(indicators, dict):
+        return invalid_result("Invalid indicators")
+
+    market_regime = normalize_market_regime(market_regime)
 
     if market_regime == "UNKNOWN":
-
-        return invalid_result(
-            "BTC market regime is unknown"
-        )
+        return invalid_result("BTC market regime is unknown")
 
     required = [
         "price",
@@ -103,24 +91,18 @@ def calculate_technical_score(
         "macd_signal",
         "volume",
         "volume_avg",
-        "previous_close"
+        "previous_close",
     ]
 
+    values = {}
+
     for key in required:
-
-        if (
-            key not in indicators
-            or not valid_number(indicators[key])
-        ):
-
+        if key not in indicators or not valid_number(indicators[key]):
             return invalid_result(
                 f"Missing or invalid indicator: {key}"
             )
 
-    values = {
-        key: float(indicators[key])
-        for key in required
-    }
+        values[key] = float(indicators[key])
 
     price = values["price"]
     ema9 = values["ema9"]
@@ -142,123 +124,86 @@ def calculate_technical_score(
         or previous_close <= 0
         or atr <= 0
     ):
-
         return invalid_result(
             "Invalid price, EMA, ATR or previous close"
         )
 
     if not 0 <= rsi <= 100:
-
-        return invalid_result(
-            "RSI outside valid range"
-        )
+        return invalid_result("RSI outside valid range")
 
     if volume < 0 or volume_avg <= 0:
-
-        return invalid_result(
-            "Invalid volume data"
-        )
+        return invalid_result("Invalid volume data")
 
     volume_ratio = volume / volume_avg
 
     if not valid_number(volume_ratio):
-
-        return invalid_result(
-            "Invalid volume ratio"
-        )
+        return invalid_result("Invalid volume ratio")
 
     score = 0
     reasons = []
 
     # EMA alignment
-
     if ema9 > ema21 > ema50:
-
         score += 25
         reasons.append("EMA bullish alignment")
 
     # Price position
-
     if price > ema50:
-
         score += 10
         reasons.append("Price above EMA50")
 
     # MACD momentum
-
     if macd > macd_signal:
-
         score += 15
         reasons.append("MACD bullish")
 
     # RSI conditions
-
     if 48 <= rsi <= 68:
-
         score += 15
         reasons.append("RSI in preferred range")
 
     elif 42 <= rsi < 48 or 68 < rsi <= 72:
-
         score += 7
         reasons.append("RSI in acceptable range")
 
     else:
-
         reasons.append("RSI outside preferred range")
 
     # Volume conditions
-
     if volume_ratio >= 1.5:
-
         score += 10
         reasons.append("Strong volume")
 
     elif volume_ratio >= 1:
-
         score += 5
         reasons.append("Volume above average")
 
     else:
-
         reasons.append("Volume below average")
 
     # Previous candle movement
-
     if price > previous_close:
-
         score += 10
         reasons.append("Positive candle movement")
 
     else:
-
         reasons.append("No positive candle movement")
 
     # BTC market regime penalty
-
     if market_regime == "NOT_BULLISH":
-
         score = max(0, score - 10)
-
         reasons.append(
             "BTC is not bullish: risk penalty applied"
         )
-
     else:
+        reasons.append("BTC market regime is bullish")
 
-        reasons.append(
-            "BTC market regime is bullish"
-        )
-
-    score = max(
-        0,
-        min(score, MAX_TECHNICAL_SCORE)
-    )
+    score = max(0, min(score, MAX_TECHNICAL_SCORE))
 
     return {
         "score": score,
         "reasons": reasons,
-        "valid": True
+        "valid": True,
     }
 
 
@@ -266,94 +211,76 @@ def evaluate_setup(
     indicators,
     market_regime,
     ai_result,
-    technical_result=None
+    technical_result=None,
 ):
 
-    # Validate market regime even when a technical
-    # result has already been supplied.
-
-    if not isinstance(market_regime, str):
-        market_regime = "UNKNOWN"
-
-    market_regime = market_regime.strip().upper()
-
-    if market_regime not in VALID_MARKET_REGIMES:
-        market_regime = "UNKNOWN"
+    market_regime = normalize_market_regime(market_regime)
 
     if market_regime == "UNKNOWN":
-
         return {
             "action": "WAIT",
             "score": 0,
-            "reasons": [
-                "BTC market regime is unknown"
-            ],
-            "ai_vote": "UNAVAILABLE"
+            "reasons": ["BTC market regime is unknown"],
+            "ai_vote": "UNAVAILABLE",
         }
 
-    if technical_result is None:
+    # Always calculate a fresh technical result.
+    calculated_result = calculate_technical_score(
+        indicators,
+        market_regime,
+    )
 
-        technical_result = calculate_technical_score(
-            indicators,
-            market_regime
-        )
-
-    if not isinstance(technical_result, dict):
-        technical_result = {}
-
-    if technical_result.get("valid") is not True:
-
+    if calculated_result.get("valid") is not True:
         return {
             "action": "WAIT",
             "score": 0,
             "reasons": valid_reasons(
-                technical_result.get(
-                    "reasons",
-                    ["Technical analysis invalid"]
-                )
+                calculated_result.get("reasons")
             ) or ["Technical analysis invalid"],
-            "ai_vote": "UNAVAILABLE"
+            "ai_vote": "UNAVAILABLE",
         }
 
-    raw_score = technical_result.get("score")
+    # If an external result was supplied, verify that it
+    # agrees with the freshly calculated score.
+    if technical_result is not None:
 
-    if not valid_number(raw_score):
+        if not isinstance(technical_result, dict):
+            return {
+                "action": "WAIT",
+                "score": 0,
+                "reasons": ["Invalid supplied technical result"],
+                "ai_vote": "UNAVAILABLE",
+            }
 
-        return {
-            "action": "WAIT",
-            "score": 0,
-            "reasons": ["Invalid technical score"],
-            "ai_vote": "UNAVAILABLE"
-        }
+        supplied_score = technical_result.get("score")
 
-    raw_score = float(raw_score)
+        if (
+            technical_result.get("valid") is not True
+            or not valid_number(supplied_score)
+            or float(supplied_score) != float(
+                calculated_result["score"]
+            )
+        ):
+            return {
+                "action": "WAIT",
+                "score": 0,
+                "reasons": [
+                    "Supplied technical result does not match indicators"
+                ],
+                "ai_vote": "UNAVAILABLE",
+            }
 
-    if not 0 <= raw_score <= MAX_TECHNICAL_SCORE:
-
-        return {
-            "action": "WAIT",
-            "score": 0,
-            "reasons": [
-                "Technical score outside valid range"
-            ],
-            "ai_vote": "UNAVAILABLE"
-        }
-
-    technical_score = int(raw_score)
+    technical_score = calculated_result["score"]
 
     reasons = valid_reasons(
-        technical_result.get("reasons", [])
+        calculated_result.get("reasons", [])
     )
 
-    # Validate AI result
-
+    # Validate AI result.
     if not isinstance(ai_result, dict):
         ai_result = {}
 
-    raw_vote = ai_result.get(
-        "vote",
-        "UNAVAILABLE"
-    )
+    raw_vote = ai_result.get("vote", "UNAVAILABLE")
 
     if isinstance(raw_vote, str):
         vote = raw_vote.strip().upper()
@@ -366,73 +293,59 @@ def evaluate_setup(
     ai_reason = ai_result.get("reason", "")
 
     if isinstance(ai_reason, str) and ai_reason.strip():
-
         reasons.append(
             f"AI: {ai_reason.strip()[:200]}"
         )
 
     # AI must explicitly approve the setup.
-
     if vote != "BUY":
+        reasons.append(f"AI approval missing: {vote}")
 
+        return {
+            "action": "WAIT",
+            "score": technical_score,
+            "reasons": valid_reasons(reasons),
+            "ai_vote": vote,
+        }
+
+    # Apply bounded AI approval bonus.
+    final_score = min(
+        technical_score + AI_APPROVAL_BONUS,
+        100,
+    )
+
+    reasons.append("AI BUY approval received")
+
+    # Validate configured entry threshold.
+    if not valid_number(MIN_SCORE_TO_ENTER):
+        logger.error(
+            "Invalid MIN_SCORE_TO_ENTER configuration"
+        )
+
+        reasons.append("Invalid entry threshold configuration")
+
+        return {
+            "action": "WAIT",
+            "score": technical_score,
+            "reasons": valid_reasons(reasons),
+            "ai_vote": vote,
+        }
+
+    threshold = float(MIN_SCORE_TO_ENTER)
+
+    if not 0 <= threshold <= 100:
         reasons.append(
-            f"AI approval missing: {vote}"
+            "Entry threshold outside valid range"
         )
 
         return {
             "action": "WAIT",
             "score": technical_score,
             "reasons": valid_reasons(reasons),
-            "ai_vote": vote
-        }
-
-    # Apply bounded AI approval bonus.
-
-    final_score = min(
-        technical_score + AI_APPROVAL_BONUS,
-        100
-    )
-
-    reasons.append(
-        "AI BUY approval received"
-    )
-
-    # Validate configured entry threshold.
-
-    if not valid_number(MIN_SCORE_TO_ENTER):
-
-        logger.error(
-            "Invalid MIN_SCORE_TO_ENTER configuration"
-        )
-
-        return {
-            "action": "WAIT",
-            "score": technical_score,
-            "reasons": valid_reasons(
-                reasons + [
-                    "Invalid entry threshold configuration"
-                ]
-            ),
-            "ai_vote": vote
-        }
-
-    threshold = float(MIN_SCORE_TO_ENTER)
-
-    if not 0 <= threshold <= 100:
-
-        return {
-            "action": "WAIT",
-            "score": technical_score,
-            "reasons": valid_reasons(
-                reasons + [
-                    "Entry threshold outside valid range"
-                ]
-            ),
-            "ai_vote": vote
+            "ai_vote": vote,
         }
 
     if final_score < threshold:
-
         reasons.append(
             f"Score below threshold: {threshold}"
         )
@@ -441,7 +354,7 @@ def evaluate_setup(
             "action": "WAIT",
             "score": final_score,
             "reasons": valid_reasons(reasons),
-            "ai_vote": vote
+            "ai_vote": vote,
         }
 
     reasons.append(
@@ -452,5 +365,5 @@ def evaluate_setup(
         "action": "PAPER_BUY",
         "score": final_score,
         "reasons": valid_reasons(reasons),
-        "ai_vote": vote
+        "ai_vote": vote,
     }
