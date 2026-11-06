@@ -339,8 +339,8 @@ class MarketData:
                 f"Unsupported BingX kline interval: {interval}"
             )
 
-        if limit < 1 or limit > 1440:
-            raise MarketDataError("BingX kline limit must be between 1 and 1440.")
+        if limit < 60 or limit > 1440:
+            raise MarketDataError("BingX kline limit must be between 60 and 1440.")
 
         data = await self._request_json(
             "/openApi/spot/v2/market/kline",
