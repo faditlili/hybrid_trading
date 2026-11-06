@@ -240,8 +240,8 @@ def validate_config():
     # MARKET DATA
     # --------------------------------------------------------
 
-    if not _valid_https_url(BINANCE_BASE_URL):
-        errors.append("BINANCE_BASE_URL must be a valid HTTPS URL.")
+    if not _valid_https_url(BINGX_BASE_URL):
+    errors.append("BINGX_BASE_URL must be a valid HTTPS URL.")
 
     if not isinstance(TIMEFRAME, str) or not TIMEFRAME:
         errors.append("TIMEFRAME must be a non-empty string.")
