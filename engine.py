@@ -46,7 +46,10 @@ def safe_float(value, default=0.0):
     if valid_number(value):
         return float(value)
 
-    return float(default)
+    if valid_number(default):
+        return float(default)
+
+    return 0.0
 
 
 def safe_reasons(value):
@@ -120,30 +123,42 @@ class TradingEngine:
                 "AI QUANT only supports PAPER_MODE=True"
             )
 
-        numeric_settings = {
+        settings = {
             "SCAN_INTERVAL_SECONDS": SCAN_INTERVAL_SECONDS,
             "MAX_SCAN_DURATION_SECONDS": MAX_SCAN_DURATION_SECONDS,
             "MIN_SCORE_TO_ENTER": MIN_SCORE_TO_ENTER,
         }
 
-        for name, value in numeric_settings.items():
+        for name, value in settings.items():
 
             if not valid_number(value):
                 raise ValueError(
                     f"{name} must be a valid finite number"
                 )
 
-        if SCAN_INTERVAL_SECONDS <= 0:
+        self.scan_interval = float(
+            SCAN_INTERVAL_SECONDS
+        )
+
+        self.max_scan_duration = float(
+            MAX_SCAN_DURATION_SECONDS
+        )
+
+        self.minimum_score = float(
+            MIN_SCORE_TO_ENTER
+        )
+
+        if self.scan_interval <= 0:
             raise ValueError(
                 "SCAN_INTERVAL_SECONDS must be positive"
             )
 
-        if MAX_SCAN_DURATION_SECONDS <= 0:
+        if self.max_scan_duration <= 0:
             raise ValueError(
                 "MAX_SCAN_DURATION_SECONDS must be positive"
             )
 
-        if not 0 <= MIN_SCORE_TO_ENTER <= 100:
+        if not 0 <= self.minimum_score <= 100:
             raise ValueError(
                 "MIN_SCORE_TO_ENTER must be between 0 and 100"
             )
@@ -182,18 +197,6 @@ class TradingEngine:
             normalized.append(symbol)
 
         self.symbols = normalized
-
-        self.scan_interval = float(
-            SCAN_INTERVAL_SECONDS
-        )
-
-        self.max_scan_duration = float(
-            MAX_SCAN_DURATION_SECONDS
-        )
-
-        self.minimum_score = float(
-            MIN_SCORE_TO_ENTER
-        )
 
     # ========================================================
     # LIFECYCLE
@@ -274,8 +277,7 @@ class TradingEngine:
 
             self.running = False
 
-            # Wait for an active scan to finish or time out
-            # before closing its dependencies.
+            # Wait for an active scan before closing dependencies.
 
             async with self.scan_lock:
 
@@ -631,21 +633,41 @@ class TradingEngine:
                 "WAIT",
             )
 
-            score = safe_float(
-                decision.get("score")
+            score_value = decision.get("score")
+
+            score_valid = (
+                valid_number(score_value)
+                and 0 <= float(score_value) <= 100
+            )
+
+            score = (
+                float(score_value)
+                if score_valid
+                else 0.0
             )
 
             ai_vote = str(
-                decision.get("ai_vote", "UNAVAILABLE")
-            )
+                decision.get(
+                    "ai_vote",
+                    "UNAVAILABLE"
+                )
+            ).strip().upper()
 
             reasons = safe_reasons(
                 decision.get("reasons", [])
             )
 
-            # Only PAPER_BUY is an accepted entry action.
+            # Independent final safety checks.
+            # Both AI approval and minimum score are required.
 
-            if action == "PAPER_BUY":
+            approved = (
+                action == "PAPER_BUY"
+                and ai_vote == "BUY"
+                and score_valid
+                and score >= self.minimum_score
+            )
+
+            if approved:
 
                 price = indicators.get("price")
                 atr = indicators.get("atr")
@@ -689,15 +711,15 @@ class TradingEngine:
 
             else:
 
-                if action != "WAIT":
-
-                    action = "WAIT"
-
-                    reasons.append(
-                        "Unsupported decision action"
-                    )
+                action = "WAIT"
 
                 stats["rejected"] += 1
+
+                if decision.get("action") == "PAPER_BUY":
+
+                    reasons.append(
+                        "Entry blocked by independent safety validation"
+                    )
 
             self.record_decision(
                 symbol,
