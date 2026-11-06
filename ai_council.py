@@ -171,11 +171,17 @@ def validate_ai_configuration():
     if int(AI_MAX_CONCURRENCY) < 1:
         return False
 
-    if not valid_number(AI_MIN_MODELS):
-        return False
+    if (
+    not valid_number(AI_MAX_CONCURRENCY)
+    or float(AI_MAX_CONCURRENCY) != int(AI_MAX_CONCURRENCY)
+    or int(AI_MAX_CONCURRENCY) < 1):
+    return False
 
-    if int(AI_MIN_MODELS) < 1:
-        return False
+    if (
+    not valid_number(AI_MIN_MODELS)
+    or float(AI_MIN_MODELS) != int(AI_MIN_MODELS)
+    or int(AI_MIN_MODELS) < 1):
+    return False
 
     if not valid_number(AI_MIN_AGREEMENT):
         return False
@@ -183,7 +189,12 @@ def validate_ai_configuration():
     if not 0.5 <= float(AI_MIN_AGREEMENT) <= 1.0:
         return False
 
-    return bool(_valid_models(HF_MODELS))
+    models = _valid_models(HF_MODELS)
+
+   if len(models) < int(AI_MIN_MODELS):
+    return False
+       
+    return True
 
 
 # ============================================================
