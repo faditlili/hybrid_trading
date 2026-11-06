@@ -34,7 +34,13 @@ def safe_float(value, default=0.0):
     if valid_number(value):
         return float(value)
 
-    return float(default)
+    if default is None:
+        return None
+
+    if valid_number(default):
+        return float(default)
+
+    return 0.0
 
 
 class PaperTrader:
@@ -49,77 +55,79 @@ class PaperTrader:
         account = self.db.get_account()
 
         if not isinstance(account, dict):
-            raise RuntimeError("Unable to load paper account")
+            raise RuntimeError(
+                "Unable to load paper account"
+            )
 
-        self.balance = safe_float(
-            account.get("balance"),
-            INITIAL_BALANCE
-        )
+        if not valid_number(account.get("balance")):
+            raise RuntimeError(
+                "Invalid paper account balance"
+            )
 
-        self.realized_pnl = safe_float(
-            account.get("realized_pnl"),
-            0.0
-        )
+        if not valid_number(account.get("realized_pnl")):
+            raise RuntimeError(
+                "Invalid paper account realized PnL"
+            )
+
+        self.balance = float(account["balance"])
+        self.realized_pnl = float(account["realized_pnl"])
 
         if self.balance < 0:
             raise ValueError(
                 "Account balance cannot be negative"
             )
 
-        if not valid_number(self.realized_pnl):
-            raise ValueError("Invalid realized PnL")
-
         self.live_marks = {}
 
     def _validate_config(self):
 
-        if (
-            not valid_number(INITIAL_BALANCE)
-            or float(INITIAL_BALANCE) <= 0
-        ):
-            raise ValueError("Invalid INITIAL_BALANCE")
-
-        if (
-            not valid_number(RISK_PER_TRADE_PCT)
-            or not 0 < float(RISK_PER_TRADE_PCT) <= 1
-        ):
-            raise ValueError("Invalid RISK_PER_TRADE_PCT")
-
-        if (
-            not valid_number(MAX_ALLOCATION_PCT)
-            or not 0 < float(MAX_ALLOCATION_PCT) <= 1
-        ):
-            raise ValueError("Invalid MAX_ALLOCATION_PCT")
-
-        if (
-            not valid_number(FEE_RATE)
-            or not 0 <= float(FEE_RATE) < 1
-        ):
-            raise ValueError("Invalid FEE_RATE")
-
-        if (
-            not valid_number(SIMULATED_SLIPPAGE_BPS)
-            or not 0 <= float(SIMULATED_SLIPPAGE_BPS) < 10000
-        ):
-            raise ValueError(
-                "Invalid SIMULATED_SLIPPAGE_BPS"
+        checks = [
+            (
+                INITIAL_BALANCE,
+                "INITIAL_BALANCE",
+                lambda x: x > 0
+            ),
+            (
+                RISK_PER_TRADE_PCT,
+                "RISK_PER_TRADE_PCT",
+                lambda x: 0 < x <= 1
+            ),
+            (
+                MAX_ALLOCATION_PCT,
+                "MAX_ALLOCATION_PCT",
+                lambda x: 0 < x <= 1
+            ),
+            (
+                FEE_RATE,
+                "FEE_RATE",
+                lambda x: 0 <= x < 1
+            ),
+            (
+                SIMULATED_SLIPPAGE_BPS,
+                "SIMULATED_SLIPPAGE_BPS",
+                lambda x: 0 <= x < 10000
+            ),
+            (
+                STOP_ATR_MULTIPLIER,
+                "STOP_ATR_MULTIPLIER",
+                lambda x: x > 0
+            ),
+            (
+                TARGET_R_MULTIPLIER,
+                "TARGET_R_MULTIPLIER",
+                lambda x: x > 0
             )
+        ]
 
-        if (
-            not valid_number(STOP_ATR_MULTIPLIER)
-            or float(STOP_ATR_MULTIPLIER) <= 0
-        ):
-            raise ValueError(
-                "Invalid STOP_ATR_MULTIPLIER"
-            )
+        for value, name, condition in checks:
 
-        if (
-            not valid_number(TARGET_R_MULTIPLIER)
-            or float(TARGET_R_MULTIPLIER) <= 0
-        ):
-            raise ValueError(
-                "Invalid TARGET_R_MULTIPLIER"
-            )
+            if (
+                not valid_number(value)
+                or not condition(float(value))
+            ):
+                raise ValueError(
+                    f"Invalid configuration: {name}"
+                )
 
         if (
             isinstance(MAX_OPEN_POSITIONS, bool)
@@ -139,20 +147,96 @@ class PaperTrader:
                 "Invalid positions returned by database"
             )
 
-        result = []
-
-        for position in positions:
-
-            if not isinstance(position, dict):
-                continue
-
-            result.append(dict(position))
-
-        return result
+        return [
+            dict(position)
+            for position in positions
+            if isinstance(position, dict)
+        ]
 
     def _slippage(self):
 
-        return float(SIMULATED_SLIPPAGE_BPS) / 10000.0
+        return (
+            float(SIMULATED_SLIPPAGE_BPS)
+            / 10000.0
+        )
+
+    def _calculate_position_size(
+        self,
+        price,
+        stop_distance
+    ):
+
+        slippage = self._slippage()
+        fee_rate = float(FEE_RATE)
+
+        entry_price = price * (1.0 + slippage)
+
+        stop_loss = entry_price - stop_distance
+
+        if stop_loss <= 0:
+            return None
+
+        estimated_stop_exit = (
+            stop_loss * (1.0 - slippage)
+        )
+
+        entry_fee_per_unit = (
+            entry_price * fee_rate
+        )
+
+        exit_fee_per_unit = (
+            estimated_stop_exit * fee_rate
+        )
+
+        estimated_loss_per_unit = (
+            entry_price
+            - estimated_stop_exit
+            + entry_fee_per_unit
+            + exit_fee_per_unit
+        )
+
+        if (
+            not valid_number(estimated_loss_per_unit)
+            or estimated_loss_per_unit <= 0
+        ):
+            return None
+
+        risk_budget = (
+            self.balance
+            * float(RISK_PER_TRADE_PCT)
+        )
+
+        max_allocation = (
+            self.balance
+            * float(MAX_ALLOCATION_PCT)
+        )
+
+        quantity_by_risk = (
+            risk_budget
+            / estimated_loss_per_unit
+        )
+
+        quantity_by_allocation = (
+            max_allocation
+            / entry_price
+        )
+
+        quantity = min(
+            quantity_by_risk,
+            quantity_by_allocation
+        )
+
+        if (
+            not valid_number(quantity)
+            or quantity <= 0
+        ):
+            return None
+
+        return {
+            "quantity": quantity,
+            "entry_price": entry_price,
+            "stop_loss": stop_loss
+        }
 
     def open_position(self, symbol, price, atr):
 
@@ -213,48 +297,29 @@ class PaperTrader:
             ):
                 return False
 
-            risk_budget = (
-                self.balance * float(RISK_PER_TRADE_PCT)
+            sizing = self._calculate_position_size(
+                price,
+                stop_distance
             )
 
-            max_allocation = (
-                self.balance * float(MAX_ALLOCATION_PCT)
-            )
-
-            quantity_by_risk = (
-                risk_budget / stop_distance
-            )
-
-            # Account for entry slippage when limiting allocation.
-            entry_price_factor = 1.0 + self._slippage()
-
-            quantity_by_allocation = (
-                max_allocation
-                / (price * entry_price_factor)
-            )
-
-            quantity = min(
-                quantity_by_risk,
-                quantity_by_allocation
-            )
-
-            if (
-                not valid_number(quantity)
-                or quantity <= 0
-            ):
+            if not isinstance(sizing, dict):
                 return False
 
-            entry_price = (
-                price * entry_price_factor
-            )
+            quantity = sizing["quantity"]
+            entry_price = sizing["entry_price"]
+            stop_loss = sizing["stop_loss"]
 
-            allocation = quantity * entry_price
+            allocation = (
+                quantity * entry_price
+            )
 
             entry_fee = (
                 allocation * float(FEE_RATE)
             )
 
-            total_cost = allocation + entry_fee
+            total_cost = (
+                allocation + entry_fee
+            )
 
             if (
                 not valid_number(total_cost)
@@ -263,19 +328,13 @@ class PaperTrader:
             ):
                 return False
 
-            stop_loss = (
-                entry_price - stop_distance
-            )
-
             take_profit = (
                 entry_price
                 + stop_distance * float(TARGET_R_MULTIPLIER)
             )
 
             if (
-                not valid_number(stop_loss)
-                or not valid_number(take_profit)
-                or stop_loss <= 0
+                not valid_number(take_profit)
                 or take_profit <= entry_price
             ):
                 return False
@@ -441,8 +500,6 @@ class PaperTrader:
                 - exit_fee
             )
 
-            # Return reserved allocation and account for
-            # the realized price change and exit fee.
             new_balance = (
                 self.balance
                 + allocation
@@ -556,6 +613,10 @@ class PaperTrader:
                     position.get("allocation")
                 )
 
+                entry_price = safe_float(
+                    position.get("entry_price")
+                )
+
                 entry_fee = safe_float(
                     position.get("entry_fee")
                 )
@@ -563,6 +624,7 @@ class PaperTrader:
                 if (
                     quantity <= 0
                     or allocation <= 0
+                    or entry_price <= 0
                     or entry_fee < 0
                 ):
                     continue
