@@ -1,4 +1,3 @@
-
 import asyncio
 import json
 import logging
@@ -86,7 +85,6 @@ class AICouncil:
     async def close(self):
 
         if self.session and not self.session.closed:
-
             await self.session.close()
 
         self.session = None
@@ -338,6 +336,10 @@ Market information:
                 "reason": "Valid model response"
             }
 
+        except asyncio.CancelledError:
+
+            raise
+
         except asyncio.TimeoutError:
 
             return self.unavailable_result(
@@ -488,7 +490,10 @@ Market information:
 
         for index, result in enumerate(results):
 
-            if isinstance(result, BaseException):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+
+            if isinstance(result, Exception):
 
                 details.append({
                     "model": models[index],
