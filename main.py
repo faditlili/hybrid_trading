@@ -1,4 +1,3 @@
-import os
 import asyncio
 import logging
 
@@ -21,15 +20,16 @@ from telegram_bot import TelegramController
 
 from config import (
     HOST,
-    DEFAULT_PORT,
+    PORT,
     APP_NAME,
-    APP_VERSION
+    APP_VERSION,
+    PAPER_MODE,
 )
 
 
-# --------------------------------------------------
+# ============================================================
 # LOGGING
-# --------------------------------------------------
+# ============================================================
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,15 +38,35 @@ logging.basicConfig(
         "%(levelname)s | "
         "%(name)s | "
         "%(message)s"
-    )
+    ),
 )
 
 logger = logging.getLogger(__name__)
 
 
-# --------------------------------------------------
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+if PAPER_MODE is not True:
+    raise RuntimeError(
+        "AI QUANT must run in PAPER_MODE=True"
+    )
+
+if isinstance(PORT, bool) or not isinstance(PORT, int):
+    raise ValueError(
+        "PORT must be an integer"
+    )
+
+if not 1 <= PORT <= 65535:
+    raise ValueError(
+        "PORT must be between 1 and 65535"
+    )
+
+
+# ============================================================
 # CORE COMPONENTS
-# --------------------------------------------------
+# ============================================================
 
 db = Database()
 
@@ -63,28 +83,33 @@ engine = TradingEngine(
     ai,
     news,
     trader,
-    db
+    db,
 )
 
 telegram = TelegramController(
     engine,
-    trader
+    trader,
 )
 
 controller = SimpleNamespace(
     engine=engine,
     trader=trader,
-    db=db
+    db=db,
 )
 
 
+# ============================================================
+# APPLICATION STATE
+# ============================================================
+
 scanner_task = None
+
 shutdown_started = False
 
 
-# --------------------------------------------------
-# SHUTDOWN HELPERS
-# --------------------------------------------------
+# ============================================================
+# SCANNER SHUTDOWN
+# ============================================================
 
 async def stop_scanner():
 
@@ -98,7 +123,6 @@ async def stop_scanner():
     scanner_task = None
 
     if not task.done():
-
         task.cancel()
 
     try:
@@ -118,6 +142,10 @@ async def stop_scanner():
         )
 
 
+# ============================================================
+# APPLICATION SHUTDOWN
+# ============================================================
+
 async def shutdown_components():
 
     global shutdown_started
@@ -131,10 +159,15 @@ async def shutdown_components():
         "Application shutdown started"
     )
 
-    # Stop new scans before cancelling the background task.
+    # Prevent new background scans.
+
     engine.running = False
 
+    # Stop the scanner before closing its dependencies.
+
     await stop_scanner()
+
+    # Stop Telegram.
 
     try:
 
@@ -146,6 +179,8 @@ async def shutdown_components():
             "Telegram shutdown failed"
         )
 
+    # Close market, AI and news components.
+
     try:
 
         await engine.close()
@@ -155,6 +190,8 @@ async def shutdown_components():
         logger.exception(
             "Engine shutdown failed"
         )
+
+    # Close the database last.
 
     try:
 
@@ -171,9 +208,9 @@ async def shutdown_components():
     )
 
 
-# --------------------------------------------------
-# APPLICATION LIFECYCLE
-# --------------------------------------------------
+# ============================================================
+# APPLICATION LIFESPAN
+# ============================================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -186,29 +223,36 @@ async def lifespan(app: FastAPI):
     logger.info(
         "Starting %s version %s",
         APP_NAME,
-        APP_VERSION
+        APP_VERSION,
     )
 
     try:
 
-        # Start market data, AI and news components.
+        # Start market data, AI and news.
+
         await engine.start()
 
-        # Start the continuous market scanner.
+        # Start background scanner.
+
         scanner_task = asyncio.create_task(
             engine.run_forever(),
-            name="AI_QUANT_SCANNER"
+            name="AI_QUANT_SCANNER",
         )
 
         # Telegram is optional.
+
         try:
 
             await telegram.start()
 
+            logger.info(
+                "Telegram controller started"
+            )
+
         except Exception:
 
             logger.exception(
-                "Telegram startup failed"
+                "Telegram startup failed; application will continue"
             )
 
         logger.info(
@@ -217,28 +261,42 @@ async def lifespan(app: FastAPI):
 
         yield
 
+    except BaseException:
+
+        logger.exception(
+            "Application lifecycle interrupted"
+        )
+
+        raise
+
     finally:
 
         await shutdown_components()
 
 
-# --------------------------------------------------
-# FASTAPI
-# --------------------------------------------------
+# ============================================================
+# FASTAPI APPLICATION
+# ============================================================
 
 api_app = FastAPI(
     title=APP_NAME,
     version=APP_VERSION,
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
+
+# ============================================================
+# HEALTH ENDPOINT
+# ============================================================
 
 @api_app.get("/health")
 async def health():
 
+    task = scanner_task
+
     scanner_active = (
-        scanner_task is not None
-        and not scanner_task.done()
+        task is not None
+        and not task.done()
     )
 
     engine_running = bool(
@@ -260,9 +318,13 @@ async def health():
         "version": APP_VERSION,
         "running": engine_running,
         "scanner_active": scanner_active,
-        "paper_trading_only": True
+        "paper_trading_only": True,
     }
 
+
+# ============================================================
+# STATUS ENDPOINT
+# ============================================================
 
 @api_app.get("/api/status")
 async def api_status():
@@ -271,7 +333,7 @@ async def api_status():
 
     positions = summary.get(
         "positions",
-        []
+        [],
     ) or []
 
     return {
@@ -281,59 +343,65 @@ async def api_status():
 
         "balance": summary.get(
             "balance",
-            0
+            0,
         ),
 
         "equity": summary.get(
             "equity",
-            0
+            0,
         ),
 
         "realized_pnl": summary.get(
             "realized_pnl",
-            0
+            0,
         ),
 
         "unrealized_pnl": summary.get(
             "unrealized_pnl",
-            0
+            0,
         ),
 
         "reserved": summary.get(
             "reserved",
-            0
+            0,
         ),
 
         "open_positions": len(positions),
 
         "win_rate": summary.get(
             "win_rate",
-            0
+            0,
         ),
 
         "market_regime": getattr(
             engine,
             "market_regime",
-            "UNKNOWN"
+            "UNKNOWN",
         ),
 
         "last_scan": getattr(
             engine,
             "last_scan",
-            None
+            None,
+        ),
+
+        "last_error": getattr(
+            engine,
+            "last_error",
+            None,
         ),
 
         "scan_stats": getattr(
             engine,
             "scan_stats",
-            {}
-        )
+            {},
+        ),
     }
 
 
-# --------------------------------------------------
+# ============================================================
 # GRADIO DASHBOARD
-# --------------------------------------------------
+# ============================================================
 
 demo = create_dashboard(
     controller
@@ -342,52 +410,52 @@ demo = create_dashboard(
 app = gr.mount_gradio_app(
     api_app,
     demo,
-    path="/"
+    path="/",
 )
 
 
-# --------------------------------------------------
+# ============================================================
 # SERVER
-# --------------------------------------------------
+# ============================================================
 
 def get_server_port():
 
-    raw_port = os.getenv(
-        "PORT",
-        str(DEFAULT_PORT)
-    )
-
-    try:
-
-        port = int(raw_port)
-
-    except (TypeError, ValueError):
+    if (
+        isinstance(PORT, bool)
+        or not isinstance(PORT, int)
+        or not 1 <= PORT <= 65535
+    ):
 
         raise ValueError(
-            "PORT must be a valid integer"
+            "Invalid PORT configuration"
         )
 
-    if not 1 <= port <= 65535:
+    return PORT
 
-        raise ValueError(
-            "PORT must be between 1 and 65535"
-        )
 
-    return port
-
+# ============================================================
+# MAIN
+# ============================================================
 
 if __name__ == "__main__":
 
     try:
 
-        port = get_server_port()
+        server_port = get_server_port()
+
+        logger.info(
+            "Starting %s on %s:%s",
+            APP_NAME,
+            HOST,
+            server_port,
+        )
 
         uvicorn.run(
             app,
             host=HOST,
-            port=port,
+            port=server_port,
             log_level="info",
-            access_log=True
+            access_log=True,
         )
 
     except KeyboardInterrupt:
