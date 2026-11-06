@@ -1,449 +1,486 @@
 import sqlite3
 import json
+import logging
+import threading
 
 from datetime import datetime, timezone
 
-from config import DATABASE_PATH, INITIAL_BALANCE
+from config import INITIAL_BALANCE, DB_PATH
 
 
-def now_iso():
+logger = logging.getLogger(__name__)
+
+
+def utc_timestamp():
     return datetime.now(timezone.utc).isoformat()
 
 
 class Database:
 
-    def __init__(self):
+    def __init__(self, db_path=None):
 
+        self.db_path = db_path or DB_PATH
+
+        self.lock = threading.RLock()
         self.conn = sqlite3.connect(
-            DATABASE_PATH,
-            check_same_thread=False,
-            timeout=30
+            self.db_path,
+            timeout=30,
+            check_same_thread=False
         )
 
         self.conn.row_factory = sqlite3.Row
 
-        self.conn.execute("PRAGMA busy_timeout = 30000")
-        self.conn.execute("PRAGMA journal_mode = WAL")
-        self.conn.execute("PRAGMA foreign_keys = ON")
+        with self.lock:
 
-        self._init()
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA busy_timeout=30000")
+            self.conn.execute("PRAGMA foreign_keys=ON")
 
-    def _init(self):
+            self._create_tables()
+            self._migrate()
 
-        with self.conn:
+        logger.info("Database initialized: %s", self.db_path)
 
-            cur = self.conn.cursor()
+    def _create_tables(self):
 
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS account (
-                    id INTEGER PRIMARY KEY CHECK(id=1),
-                    balance REAL NOT NULL,
-                    realized_pnl REAL NOT NULL DEFAULT 0,
-                    wins INTEGER NOT NULL DEFAULT 0,
-                    losses INTEGER NOT NULL DEFAULT 0,
-                    updated_at TEXT NOT NULL
-                )
-            """)
+        self.conn.executescript("""
 
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS positions (
-                    symbol TEXT PRIMARY KEY,
-                    side TEXT NOT NULL,
-                    quantity REAL NOT NULL,
-                    entry REAL NOT NULL,
-                    stop REAL NOT NULL,
-                    target REAL NOT NULL,
-                    allocation REAL NOT NULL,
-                    entry_fee REAL NOT NULL,
-                    opened_at TEXT NOT NULL
-                )
-            """)
+        CREATE TABLE IF NOT EXISTS account (
+            id INTEGER PRIMARY KEY,
+            balance REAL NOT NULL,
+            realized_pnl REAL NOT NULL DEFAULT 0
+        );
 
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS trades (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    symbol TEXT NOT NULL,
-                    side TEXT NOT NULL,
-                    entry REAL NOT NULL,
-                    exit REAL NOT NULL,
-                    quantity REAL NOT NULL,
-                    pnl REAL NOT NULL,
-                    reason TEXT NOT NULL,
-                    opened_at TEXT NOT NULL,
-                    closed_at TEXT NOT NULL
-                )
-            """)
+        CREATE TABLE IF NOT EXISTS positions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT NOT NULL UNIQUE,
+            quantity REAL NOT NULL,
+            entry_price REAL NOT NULL,
+            allocation REAL NOT NULL,
+            entry_fee REAL NOT NULL,
+            stop_loss REAL NOT NULL,
+            take_profit REAL NOT NULL,
+            opened_at TEXT NOT NULL
+        );
 
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS decisions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    symbol TEXT NOT NULL,
-                    score INTEGER,
-                    action TEXT NOT NULL,
-                    reasons TEXT NOT NULL,
-                    ai_vote TEXT DEFAULT 'N/A',
-                    created_at TEXT NOT NULL
-                )
-            """)
+        CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL DEFAULT 'BUY',
+            quantity REAL NOT NULL,
+            entry_price REAL NOT NULL,
+            exit_price REAL NOT NULL,
+            gross_pnl REAL NOT NULL,
+            net_pnl REAL NOT NULL,
+            entry_fee REAL NOT NULL,
+            exit_fee REAL NOT NULL,
+            reason TEXT,
+            opened_at TEXT,
+            closed_at TEXT NOT NULL
+        );
 
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    level TEXT NOT NULL,
-                    message TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                )
-            """)
+        CREATE TABLE IF NOT EXISTS decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT NOT NULL,
+            action TEXT NOT NULL,
+            score INTEGER NOT NULL DEFAULT 0,
+            ai_vote TEXT,
+            reasons TEXT,
+            timestamp TEXT NOT NULL
+        );
 
-            # ترحيل قاعدة بيانات قديمة:
-            # إضافة ai_vote إن لم يكن موجوداً
-            decision_columns = {
-                row["name"]
-                for row in cur.execute(
-                    "PRAGMA table_info(decisions)"
-                ).fetchall()
-            }
+        CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            level TEXT NOT NULL,
+            message TEXT NOT NULL,
+            timestamp TEXT NOT NULL
+        );
 
-            if "ai_vote" not in decision_columns:
+        """)
 
-                cur.execute("""
-                    ALTER TABLE decisions
-                    ADD COLUMN ai_vote TEXT DEFAULT 'N/A'
-                """)
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO account
+            (id, balance, realized_pnl)
+            VALUES (1, ?, 0)
+            """,
+            (INITIAL_BALANCE,)
+        )
 
-            cur.execute(
-                "SELECT id FROM account WHERE id=1"
+        self.conn.commit()
+
+    def _migrate(self):
+
+        columns = {
+            row["name"]
+            for row in self.conn.execute(
+                "PRAGMA table_info(decisions)"
+            ).fetchall()
+        }
+
+        if "ai_vote" not in columns:
+
+            self.conn.execute(
+                "ALTER TABLE decisions ADD COLUMN ai_vote TEXT"
             )
 
-            if not cur.fetchone():
-
-                cur.execute("""
-                    INSERT INTO account(
-                        id, balance, realized_pnl,
-                        wins, losses, updated_at
-                    )
-                    VALUES(1, ?, 0, 0, 0, ?)
-                """, (
-                    INITIAL_BALANCE,
-                    now_iso()
-                ))
-
-    # ACCOUNT
+        self.conn.commit()
 
     def get_account(self):
 
-        row = self.conn.execute(
-            "SELECT * FROM account WHERE id=1"
-        ).fetchone()
+        with self.lock:
 
-        return dict(row)
+            row = self.conn.execute(
+                "SELECT * FROM account WHERE id=1"
+            ).fetchone()
 
-    def account(self):
-        return self.get_account()
-
-    def update_account(
-        self,
-        balance,
-        realized_pnl,
-        wins,
-        losses
-    ):
-
-        with self.conn:
-
-            self.conn.execute("""
-                UPDATE account
-                SET balance=?,
-                    realized_pnl=?,
-                    wins=?,
-                    losses=?,
-                    updated_at=?
-                WHERE id=1
-            """, (
-                balance,
-                realized_pnl,
-                wins,
-                losses,
-                now_iso()
-            ))
-
-    # POSITIONS
+            return dict(row) if row else None
 
     def get_positions(self):
 
-        rows = self.conn.execute("""
-            SELECT *
-            FROM positions
-            ORDER BY opened_at DESC
-        """).fetchall()
+        with self.lock:
 
-        return [
-            {
-                "symbol": row["symbol"],
-                "side": row["side"],
-                "quantity": row["quantity"],
-                "entry_price": row["entry"],
-                "stop_loss": row["stop"],
-                "take_profit": row["target"],
-                "allocation": row["allocation"],
-                "entry_fee": row["entry_fee"],
-                "opened_at": row["opened_at"]
-            }
-            for row in rows
-        ]
+            rows = self.conn.execute(
+                "SELECT * FROM positions ORDER BY opened_at"
+            ).fetchall()
 
-    def positions(self):
-        return self.get_positions()
+            return [
+                {
+                    "symbol": row["symbol"],
+                    "quantity": row["quantity"],
+                    "entry_price": row["entry_price"],
+                    "allocation": row["allocation"],
+                    "entry_fee": row["entry_fee"],
+                    "stop_loss": row["stop_loss"],
+                    "take_profit": row["take_profit"],
+                    "opened_at": row["opened_at"]
+                }
+                for row in rows
+            ]
 
-    # ATOMIC OPEN
+    def open_position_atomic(self, position, new_balance):
 
-    def open_position_atomic(
-        self,
-        position,
-        balance,
-        realized_pnl,
-        wins,
-        losses
-    ):
+        with self.lock:
 
-        try:
+            try:
 
-            with self.conn:
+                with self.conn:
 
-                self.conn.execute("""
-                    INSERT INTO positions(
-                        symbol, side, quantity, entry,
-                        stop, target, allocation,
-                        entry_fee, opened_at
+                    self.conn.execute(
+                        """
+                        INSERT INTO positions (
+                            symbol,
+                            quantity,
+                            entry_price,
+                            allocation,
+                            entry_fee,
+                            stop_loss,
+                            take_profit,
+                            opened_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            position["symbol"],
+                            position["quantity"],
+                            position["entry_price"],
+                            position["allocation"],
+                            position["entry_fee"],
+                            position["stop_loss"],
+                            position["take_profit"],
+                            position.get("opened_at", utc_timestamp())
+                        )
                     )
-                    VALUES(?,?,?,?,?,?,?,?,?)
-                """, (
-                    position["symbol"],
-                    "BUY",
-                    position["quantity"],
-                    position["entry_price"],
-                    position["stop_loss"],
-                    position["take_profit"],
-                    position["allocation"],
-                    position["entry_fee"],
-                    now_iso()
-                ))
 
-                cur = self.conn.execute("""
-                    UPDATE account
-                    SET balance=?,
-                        realized_pnl=?,
-                        wins=?,
-                        losses=?,
-                        updated_at=?
-                    WHERE id=1
-                """, (
-                    balance,
-                    realized_pnl,
-                    wins,
-                    losses,
-                    now_iso()
-                ))
+                    self.conn.execute(
+                        """
+                        UPDATE account
+                        SET balance=?
+                        WHERE id=1
+                        """,
+                        (new_balance,)
+                    )
 
-                if cur.rowcount != 1:
-                    raise RuntimeError("Account missing")
+                return True
 
-            return True
+            except sqlite3.Error:
 
-        except Exception:
-            return False
-
-    # ATOMIC CLOSE
+                logger.exception("Failed to open paper position")
+                return False
 
     def close_position_atomic(
         self,
         symbol,
         trade,
-        balance,
-        realized_pnl,
-        wins,
-        losses
+        new_balance,
+        new_realized_pnl
     ):
 
-        try:
+        with self.lock:
 
-            with self.conn:
+            try:
 
-                position = self.conn.execute("""
-                    SELECT opened_at
-                    FROM positions
-                    WHERE symbol=?
-                """, (symbol,)).fetchone()
+                with self.conn:
 
-                if not position:
-                    raise RuntimeError("Position missing")
+                    row = self.conn.execute(
+                        """
+                        SELECT opened_at
+                        FROM positions
+                        WHERE symbol=?
+                        """,
+                        (symbol,)
+                    ).fetchone()
 
-                self.conn.execute("""
-                    INSERT INTO trades(
-                        symbol, side, entry, exit,
-                        quantity, pnl, reason,
-                        opened_at, closed_at
+                    if not row:
+                        return False
+
+                    self.conn.execute(
+                        """
+                        INSERT INTO trades (
+                            symbol,
+                            side,
+                            quantity,
+                            entry_price,
+                            exit_price,
+                            gross_pnl,
+                            net_pnl,
+                            entry_fee,
+                            exit_fee,
+                            reason,
+                            opened_at,
+                            closed_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            symbol,
+                            "BUY",
+                            trade["quantity"],
+                            trade["entry_price"],
+                            trade["exit_price"],
+                            trade["gross_pnl"],
+                            trade["net_pnl"],
+                            trade["entry_fee"],
+                            trade["exit_fee"],
+                            trade.get("reason", ""),
+                            row["opened_at"],
+                            utc_timestamp()
+                        )
                     )
-                    VALUES(?,?,?,?,?,?,?,?,?)
-                """, (
-                    trade["symbol"],
-                    "BUY",
-                    trade["entry_price"],
-                    trade["exit_price"],
-                    trade["quantity"],
-                    trade["net_pnl"],
-                    trade["reason"],
-                    position["opened_at"],
-                    now_iso()
-                ))
 
-                cur = self.conn.execute("""
-                    DELETE FROM positions
-                    WHERE symbol=?
-                """, (symbol,))
+                    self.conn.execute(
+                        "DELETE FROM positions WHERE symbol=?",
+                        (symbol,)
+                    )
 
-                if cur.rowcount != 1:
-                    raise RuntimeError("Position deletion failed")
+                    self.conn.execute(
+                        """
+                        UPDATE account
+                        SET balance=?, realized_pnl=?
+                        WHERE id=1
+                        """,
+                        (
+                            new_balance,
+                            new_realized_pnl
+                        )
+                    )
 
-                cur = self.conn.execute("""
-                    UPDATE account
-                    SET balance=?,
-                        realized_pnl=?,
-                        wins=?,
-                        losses=?,
-                        updated_at=?
-                    WHERE id=1
-                """, (
-                    balance,
-                    realized_pnl,
-                    wins,
-                    losses,
-                    now_iso()
-                ))
+                return True
 
-                if cur.rowcount != 1:
-                    raise RuntimeError("Account missing")
+            except sqlite3.Error:
 
-            return True
+                logger.exception("Failed to close paper position")
+                return False
 
-        except Exception:
-            return False
+    def log_decision(self, *args, **kwargs):
 
-    # DECISIONS
+        if args and isinstance(args[0], dict):
 
-    def log_decision(self, decision, *args):
-
-        # دعم الصيغة القديمة والجديدة
-        if isinstance(decision, dict):
-
-            data = decision
+            data = args[0]
 
         else:
 
-            data = {
-                "symbol": decision,
-                "score": args[0],
-                "action": args[1],
-                "reasons": args[2]
-            }
+            data = kwargs
 
-        with self.conn:
+            if args:
 
-            self.conn.execute("""
-                INSERT INTO decisions(
-                    symbol, score, action,
-                    reasons, ai_vote, created_at
-                )
-                VALUES(?,?,?,?,?,?)
-            """, (
-                data["symbol"],
-                data.get("score", 0),
-                data.get("action", "WAIT"),
-                json.dumps(
-                    data.get("reasons", []),
-                    ensure_ascii=False
-                ),
-                data.get("ai_vote", "N/A"),
-                data.get("timestamp", now_iso())
-            ))
+                keys = [
+                    "symbol",
+                    "action",
+                    "score",
+                    "reasons",
+                    "ai_vote",
+                    "timestamp"
+                ]
+
+                data = {
+                    **dict(zip(keys, args)),
+                    **kwargs
+                }
+
+        reasons = data.get("reasons", [])
+
+        if not isinstance(reasons, str):
+
+            reasons = json.dumps(
+                reasons,
+                ensure_ascii=False
+            )
+
+        with self.lock:
+
+            try:
+
+                with self.conn:
+
+                    self.conn.execute(
+                        """
+                        INSERT INTO decisions (
+                            symbol,
+                            action,
+                            score,
+                            ai_vote,
+                            reasons,
+                            timestamp
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(data.get("symbol", "UNKNOWN")),
+                            str(data.get("action", "WAIT")),
+                            int(data.get("score", 0)),
+                            str(data.get("ai_vote", "")),
+                            reasons,
+                            data.get("timestamp", utc_timestamp())
+                        )
+                    )
+
+                return True
+
+            except (sqlite3.Error, TypeError, ValueError):
+
+                logger.exception("Failed to log decision")
+                return False
 
     def get_recent_decisions(self, limit=15):
 
-        rows = self.recent("decisions", limit)
+        limit = max(1, min(int(limit), 500))
 
-        for row in rows:
+        with self.lock:
 
-            try:
-                row["reasons"] = json.loads(row["reasons"])
-            except (TypeError, ValueError):
-                row["reasons"] = []
+            rows = self.conn.execute(
+                """
+                SELECT *
+                FROM decisions
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,)
+            ).fetchall()
 
-        return rows
+            results = []
 
-    # TRADES
+            for row in rows:
+
+                item = dict(row)
+
+                try:
+                    item["reasons"] = json.loads(
+                        item["reasons"] or "[]"
+                    )
+                except (TypeError, ValueError):
+                    item["reasons"] = []
+
+                results.append(item)
+
+            return results
 
     def get_recent_trades(self, limit=15):
 
-        rows = self.recent("trades", limit)
+        limit = max(1, min(int(limit), 500))
 
-        return [
-            {
-                **row,
-                "entry_price": row["entry"],
-                "exit_price": row["exit"],
-                "net_pnl": row["pnl"]
-            }
-            for row in rows
-        ]
+        with self.lock:
 
-    # EVENTS
+            rows = self.conn.execute(
+                """
+                SELECT *
+                FROM trades
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,)
+            ).fetchall()
+
+            results = []
+
+            for row in rows:
+
+                item = dict(row)
+
+                item["entry_price"] = item["entry_price"]
+                item["exit_price"] = item["exit_price"]
+                item["net_pnl"] = item["net_pnl"]
+
+                results.append(item)
+
+            return results
 
     def log_event(self, level, message):
 
-        with self.conn:
+        with self.lock:
 
-            self.conn.execute("""
-                INSERT INTO events(level, message, created_at)
-                VALUES(?,?,?)
-            """, (
-                level,
-                str(message)[:1000],
-                now_iso()
-            ))
+            try:
 
-    # HISTORY
+                with self.conn:
 
-    def recent(self, table, limit=30):
+                    self.conn.execute(
+                        """
+                        INSERT INTO events (
+                            level,
+                            message,
+                            timestamp
+                        )
+                        VALUES (?, ?, ?)
+                        """,
+                        (
+                            str(level),
+                            str(message)[:2000],
+                            utc_timestamp()
+                        )
+                    )
 
-        allowed = {
-            "trades",
-            "decisions",
-            "events"
-        }
+                return True
 
-        if table not in allowed:
-            return []
+            except sqlite3.Error:
+
+                logger.exception("Failed to log event")
+                return False
+
+    def get_recent_events(self, limit=50):
 
         limit = max(1, min(int(limit), 500))
 
-        rows = self.conn.execute(
-            f"""
-            SELECT *
-            FROM {table}
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (limit,)
-        ).fetchall()
+        with self.lock:
 
-        return [
-            dict(row)
-            for row in rows
-        ]
+            rows = self.conn.execute(
+                """
+                SELECT *
+                FROM events
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,)
+            ).fetchall()
 
-    # CLEANUP
+            return [dict(row) for row in rows]
 
     def close(self):
 
-        if self.conn:
-            self.conn.close()
+        with self.lock:
+
+            if self.conn:
+
+                self.conn.close()
+                self.conn = None
+
+                logger.info("Database connection closed")
