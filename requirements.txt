@@ -3,4 +3,4 @@ fastapi>=0.110
 uvicorn[standard]>=0.27
 gradio>=4.44
 python-telegram-bot>=21,<23
-pandas>=2.0
+pandas>=
