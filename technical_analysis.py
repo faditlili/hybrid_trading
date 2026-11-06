@@ -1,3 +1,4 @@
+
 import math
 import logging
 
@@ -43,7 +44,6 @@ def calculate_indicators(df):
         data = df.copy()
 
         for column in REQUIRED_COLUMNS:
-
             data[column] = pd.to_numeric(
                 data[column],
                 errors="coerce"
@@ -53,48 +53,55 @@ def calculate_indicators(df):
             subset=REQUIRED_COLUMNS
         )
 
+        # Handle Binance close_time correctly
         if "close_time" in data.columns:
 
-    if pd.api.types.is_datetime64_any_dtype(
-        data["close_time"]
-    ):
+            if pd.api.types.is_datetime64_any_dtype(
+                data["close_time"]
+            ):
 
-        if data["close_time"].dt.tz is None:
-            data["close_time"] = data["close_time"].dt.tz_localize("UTC")
+                if data["close_time"].dt.tz is None:
+                    data["close_time"] = (
+                        data["close_time"].dt.tz_localize("UTC")
+                    )
+                else:
+                    data["close_time"] = (
+                        data["close_time"].dt.tz_convert("UTC")
+                    )
+
+            else:
+
+                close_time_numeric = pd.to_numeric(
+                    data["close_time"],
+                    errors="coerce"
+                )
+
+                data["close_time"] = pd.to_datetime(
+                    close_time_numeric,
+                    unit="ms",
+                    utc=True,
+                    errors="coerce"
+                )
+
+            data = data.dropna(
+                subset=["close_time"]
+            )
+
+            now = pd.Timestamp.now(tz="UTC")
+
+            data = data[
+                data["close_time"] < now
+            ]
+
         else:
-            data["close_time"] = data["close_time"].dt.tz_convert("UTC")
 
-        else:
-
-        close_time_numeric = pd.to_numeric(
-            data["close_time"],
-            errors="coerce"
-        )
-
-        data["close_time"] = pd.to_datetime(
-            close_time_numeric,
-            unit="ms",
-            utc=True,
-            errors="coerce"
-        )
-
-    data = data.dropna(subset=["close_time"])
-
-    now = pd.Timestamp.now(tz="UTC")
-
-    data = data[
-        data["close_time"] < now
-    ]
-
-        else:
-
-            # لا نستخدم الشمعة الأخيرة لاحتمال عدم اكتمالها
+            # Exclude potentially incomplete last candle
             data = data.iloc[:-1]
 
         if len(data) < 60:
             return None
 
-        # التحقق من سلامة بيانات OHLCV
+        # Validate OHLCV
         valid_ohlc = (
             (data["open"] > 0)
             & (data["high"] > 0)
@@ -147,7 +154,10 @@ def calculate_indicators(df):
             min_periods=14
         ).mean()
 
-        rs = avg_gain / avg_loss.replace(0, float("nan"))
+        rs = avg_gain / avg_loss.replace(
+            0,
+            float("nan")
+        )
 
         data["rsi"] = 100 - (
             100 / (1 + rs)
