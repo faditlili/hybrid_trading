@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import math
-import re
+import time
 
 from datetime import datetime, timezone
 
@@ -9,7 +9,8 @@ import aiohttp
 import pandas as pd
 
 from config import (
-    BINANCE_BASE_URL,
+    BINGX_BASE_URL,
+    BINGX_SYMBOL_MAP,
     MIN_QUOTE_VOLUME,
     TIMEFRAME,
     KLINE_LIMIT,
@@ -25,827 +26,502 @@ logger = logging.getLogger(__name__)
 
 
 class MarketDataError(Exception):
-    """Raised when market data cannot be retrieved or validated."""
+    """Raised when BingX market data is unavailable or invalid."""
+
+
+def utc_timestamp():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def valid_number(value):
+    if isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def safe_float(value, default=None):
+    if not valid_number(value):
+        return default
+    return float(value)
 
 
 class MarketData:
+    """
+    BingX Spot public market-data client.
+
+    Public market endpoints do not require an API key or secret.
+    This class only reads public market data. It has no order,
+    account, withdrawal, or private trading methods.
+    """
+
+    INTERVALS = {
+        "1m", "3m", "5m", "15m", "30m",
+        "1h", "2h", "4h", "6h", "8h",
+        "12h", "1d", "3d", "1w", "1M",
+    }
 
     def __init__(self):
+        self.base_url = BINGX_BASE_URL.rstrip("/")
+        self.symbols = list(SYMBOLS)
+        self.symbol_map = dict(BINGX_SYMBOL_MAP)
+        self.timeframe = TIMEFRAME
+        self.kline_limit = int(KLINE_LIMIT)
+        self.min_quote_volume = float(MIN_QUOTE_VOLUME)
 
-        self.session = None
-        self.base_url = BINANCE_BASE_URL.rstrip("/")
+        if self.timeframe not in self.INTERVALS:
+            raise ValueError(f"Unsupported BingX interval: {self.timeframe}")
 
-        self.timeout = aiohttp.ClientTimeout(
-            total=HTTP_TIMEOUT_SECONDS,
-            connect=HTTP_CONNECT_TIMEOUT_SECONDS,
+        if self.kline_limit < 60 or self.kline_limit > 1000:
+            raise ValueError("KLINE_LIMIT must be between 60 and 1000.")
+
+        if not valid_number(self.min_quote_volume) or self.min_quote_volume < 0:
+            raise ValueError("MIN_QUOTE_VOLUME must be a non-negative number.")
+
+        timeout = aiohttp.ClientTimeout(
+            total=float(HTTP_TIMEOUT_SECONDS),
+            connect=float(HTTP_CONNECT_TIMEOUT_SECONDS),
         )
 
-        self.connector_limit = HTTP_MAX_CONNECTIONS
-        self.retry_attempts = HTTP_RETRY_ATTEMPTS
+        self._connector_limit = max(1, int(HTTP_MAX_CONNECTIONS))
+        self._retry_attempts = max(0, int(HTTP_RETRY_ATTEMPTS))
 
-        if (
-            isinstance(self.retry_attempts, bool)
-            or not isinstance(self.retry_attempts, int)
-            or self.retry_attempts < 0
-        ):
-            raise ValueError(
-                "HTTP_RETRY_ATTEMPTS must be non-negative"
-            )
-
-        if (
-            isinstance(self.connector_limit, bool)
-            or not isinstance(self.connector_limit, int)
-            or self.connector_limit <= 0
-        ):
-            raise ValueError(
-                "HTTP_MAX_CONNECTIONS must be positive"
-            )
-
-        if (
-            not self.valid_number(MIN_QUOTE_VOLUME)
-            or float(MIN_QUOTE_VOLUME) < 0
-        ):
-            raise ValueError(
-                "MIN_QUOTE_VOLUME must be non-negative"
-            )
-
+        self._timeout = timeout
+        self._session = None
         self._session_lock = asyncio.Lock()
+        self._request_lock = asyncio.Lock()
         self._active_requests = 0
         self._idle_event = asyncio.Event()
         self._idle_event.set()
-
         self._closing = False
+        self._last_request_monotonic = 0.0
 
-        self.last_success = {}
+        self.last_success = None
         self.last_errors = {}
-
-        self._symbol_semaphore = asyncio.Semaphore(
-            min(5, self.connector_limit)
-        )
-
-    # ========================================================
-    # HELPERS
-    # ========================================================
-
-    @staticmethod
-    def valid_number(value):
-
-        if isinstance(value, bool):
-            return False
-
-        try:
-            return math.isfinite(float(value))
-
-        except (TypeError, ValueError, OverflowError):
-            return False
-
-    @staticmethod
-    def utc_timestamp():
-
-        return datetime.now(
-            timezone.utc
-        ).isoformat()
-
-    @staticmethod
-    def _valid_symbol(symbol):
-
-        return (
-            isinstance(symbol, str)
-            and bool(symbol)
-            and symbol == symbol.upper()
-            and symbol.isalnum()
-        )
-
-    @staticmethod
-    def _interval_milliseconds(interval):
-
-        if not isinstance(interval, str):
-            raise MarketDataError(
-                "Invalid kline interval"
-            )
-
-        match = re.fullmatch(
-            r"([1-9][0-9]*)(s|m|h|d|w|M)",
-            interval,
-        )
-
-        if not match:
-            raise MarketDataError(
-                f"Unsupported kline interval: {interval}"
-            )
-
-        amount = int(match.group(1))
-        unit = match.group(2)
-
-        multipliers = {
-            "s": 1000,
-            "m": 60 * 1000,
-            "h": 60 * 60 * 1000,
-            "d": 24 * 60 * 60 * 1000,
-            "w": 7 * 24 * 60 * 60 * 1000,
-        }
-
-        if unit == "M":
-            return None
-
-        return amount * multipliers[unit]
-
-    def record_error(self, symbol, error):
-
-        self.last_errors[symbol] = str(error)[:500]
-
-    # ========================================================
-    # SESSION MANAGEMENT
-    # ========================================================
+        self.last_error = None
 
     async def start(self):
-
         async with self._session_lock:
-
             if self._closing:
-                raise MarketDataError(
-                    "Market data service is closing"
+                raise MarketDataError("Market data client is closing.")
+
+            if self._session is None or self._session.closed:
+                connector = aiohttp.TCPConnector(
+                    limit=self._connector_limit,
+                    enable_cleanup_closed=True,
+                )
+                self._session = aiohttp.ClientSession(
+                    timeout=self._timeout,
+                    connector=connector,
+                    headers={"Accept": "application/json"},
                 )
 
-            if self.session and not self.session.closed:
-                return
-
-            connector = aiohttp.TCPConnector(
-                limit=self.connector_limit,
-                enable_cleanup_closed=True,
-            )
-
-            self.session = aiohttp.ClientSession(
-                timeout=self.timeout,
-                connector=connector,
-                headers={
-                    "User-Agent": "AI-QUANT-PaperTrading/3.1"
-                },
-            )
-
-            logger.info(
-                "Market data service started"
-            )
+        return True
 
     async def close(self):
+        self._closing = True
 
-        async with self._session_lock:
-
-            if self._closing:
-                return
-
-            self._closing = True
-
-        # Wait for active requests to finish before closing
-        # the shared HTTP session.
         await self._idle_event.wait()
 
         async with self._session_lock:
+            if self._session is not None and not self._session.closed:
+                await self._session.close()
+            self._session = None
 
-            session = self.session
-            self.session = None
-
-            if session and not session.closed:
-                await session.close()
-
-        logger.info(
-            "Market data service closed"
-        )
+        return True
 
     async def _acquire_session(self):
+        if self._closing:
+            raise MarketDataError("Market data client is closing.")
+
+        await self.start()
 
         async with self._session_lock:
-
-            if self._closing:
-                raise MarketDataError(
-                    "Market data service is closed"
-                )
-
-            if self.session is None or self.session.closed:
-
-                connector = aiohttp.TCPConnector(
-                    limit=self.connector_limit,
-                    enable_cleanup_closed=True,
-                )
-
-                self.session = aiohttp.ClientSession(
-                    timeout=self.timeout,
-                    connector=connector,
-                    headers={
-                        "User-Agent": "AI-QUANT-PaperTrading/3.1"
-                    },
-                )
-
-                logger.info(
-                    "Market data HTTP session created"
-                )
+            if self._session is None or self._session.closed:
+                raise MarketDataError("HTTP session is unavailable.")
 
             self._active_requests += 1
             self._idle_event.clear()
-
-            return self.session
+            return self._session
 
     async def _release_session(self):
-
         async with self._session_lock:
-
-            self._active_requests = max(
-                0,
-                self._active_requests - 1,
-            )
-
+            self._active_requests = max(0, self._active_requests - 1)
             if self._active_requests == 0:
                 self._idle_event.set()
 
-    # ========================================================
-    # HTTP REQUEST
-    # ========================================================
+    @staticmethod
+    def _extract_data(payload):
+        if not isinstance(payload, dict):
+            raise MarketDataError("BingX returned a non-object response.")
 
-    async def _request_json(
-        self,
-        endpoint,
-        params=None,
-    ):
-
-        session = await self._acquire_session()
-
-        last_error = None
-
-        try:
-
-            for attempt in range(self.retry_attempts + 1):
-
-                try:
-
-                    async with session.get(
-                        f"{self.base_url}{endpoint}",
-                        params=params,
-                    ) as response:
-
-                        if response.status == 429:
-                            raise MarketDataError(
-                                "Binance rate limit reached"
-                            )
-
-                        if response.status == 418:
-                            raise MarketDataError(
-                                "Binance temporarily blocked this IP"
-                            )
-
-                        if response.status >= 500:
-
-                            last_error = MarketDataError(
-                                f"Binance server error: {response.status}"
-                            )
-
-                        elif response.status != 200:
-
-                            body = await response.text()
-
-                            raise MarketDataError(
-                                f"HTTP {response.status}: {body[:200]}"
-                            )
-
-                        else:
-
-                            data = await response.json(
-                                content_type=None
-                            )
-
-                            if not isinstance(data, (dict, list)):
-                                raise MarketDataError(
-                                    "Unexpected Binance JSON response"
-                                )
-
-                            return data
-
-                except asyncio.CancelledError:
-                    raise
-
-                except MarketDataError as exc:
-
-                    message = str(exc).lower()
-
-                    if (
-                        "rate limit" in message
-                        or "blocked this ip" in message
-                        or message.startswith("http 4")
-                    ):
-                        raise
-
-                    last_error = exc
-
-                except (
-                    aiohttp.ClientError,
-                    asyncio.TimeoutError,
-                    ValueError,
-                ) as exc:
-
-                    last_error = exc
-
-                if attempt < self.retry_attempts:
-
-                    delay = min(
-                        2 ** attempt,
-                        8,
-                    )
-
-                    await asyncio.sleep(delay)
-
+        code = payload.get("code")
+        if str(code) != "0":
+            message = payload.get("msg") or payload.get("message") or "Unknown API error"
             raise MarketDataError(
-                f"Request failed: {last_error}"
+                f"BingX API error {code}: {message}"
             )
 
-        finally:
-            await self._release_session()
+        if "data" not in payload:
+            raise MarketDataError("BingX response does not contain data.")
 
-    # ========================================================
-    # EXCHANGE TICKER
-    # ========================================================
+        return payload["data"]
 
-    async def get_ticker(self, symbol):
+    async def _request_json(self, endpoint, params=None):
+        """
+        Perform a rate-limited public GET request.
 
-        if not self._valid_symbol(symbol):
-            raise MarketDataError(
-                "Invalid symbol"
-            )
+        BingX public market endpoints are rate-limited. Requests are
+        spaced by at least one second across this client instance.
+        """
+        params = params or {}
+        url = f"{self.base_url}{endpoint}"
 
-        try:
+        last_exception = None
 
-            data = await self._request_json(
-                "/api/v3/ticker/24hr",
-                params={
-                    "symbol": symbol
-                },
-            )
-
-            if not isinstance(data, dict):
-                raise MarketDataError(
-                    "Invalid ticker response"
-                )
+        for attempt in range(self._retry_attempts + 1):
+            session = await self._acquire_session()
 
             try:
-                price = float(data["lastPrice"])
-                volume = float(data["quoteVolume"])
-                change = float(data["priceChangePercent"])
-
-            except (KeyError, TypeError, ValueError, OverflowError) as exc:
-                raise MarketDataError(
-                    "Missing or invalid ticker fields"
-                ) from exc
-
-            if not self.valid_number(price) or price <= 0:
-                raise MarketDataError(
-                    "Invalid ticker price"
-                )
-
-            if not self.valid_number(volume) or volume < 0:
-                raise MarketDataError(
-                    "Invalid ticker volume"
-                )
-
-            if not self.valid_number(change):
-                raise MarketDataError(
-                    "Invalid price change"
-                )
-
-            timestamp = self.utc_timestamp()
-
-            result = {
-                "symbol": symbol,
-                "price": price,
-                "quote_volume": volume,
-                "change_percent": change,
-                "timestamp": timestamp,
-            }
-
-            self.last_success[symbol] = timestamp
-            self.last_errors.pop(symbol, None)
-
-            return result
-
-        except asyncio.CancelledError:
-            raise
-
-        except Exception as exc:
-
-            self.record_error(symbol, exc)
-
-            logger.warning(
-                "Ticker request failed for %s: %s",
-                symbol,
-                exc,
-            )
-
-            if isinstance(exc, MarketDataError):
-                raise
-
-            raise MarketDataError(
-                f"Invalid ticker data for {symbol}"
-            ) from exc
-
-    # ========================================================
-    # KLINES / OHLCV
-    # ========================================================
-
-    async def get_klines(
-        self,
-        symbol,
-        interval=None,
-        limit=None,
-    ):
-
-        if not self._valid_symbol(symbol):
-            raise MarketDataError(
-                "Invalid symbol"
-            )
-
-        interval = interval or TIMEFRAME
-        limit = KLINE_LIMIT if limit is None else limit
-
-        if (
-            not isinstance(interval, str)
-            or not interval.strip()
-        ):
-            raise MarketDataError(
-                "Invalid kline interval"
-            )
-
-        interval_ms = self._interval_milliseconds(
-            interval
-        )
-
-        if (
-            isinstance(limit, bool)
-            or not isinstance(limit, int)
-            or not 1 <= limit <= 1000
-        ):
-            raise MarketDataError(
-                "Invalid kline limit"
-            )
-
-        try:
-
-            raw = await self._request_json(
-                "/api/v3/klines",
-                params={
-                    "symbol": symbol,
-                    "interval": interval,
-                    "limit": limit,
-                },
-            )
-
-            if not isinstance(raw, list) or not raw:
-                raise MarketDataError(
-                    f"No kline data for {symbol}"
-                )
-
-            columns = [
-                "open_time",
-                "open",
-                "high",
-                "low",
-                "close",
-                "volume",
-                "close_time",
-                "quote_volume",
-                "trades",
-                "taker_buy_base",
-                "taker_buy_quote",
-                "ignore",
-            ]
-
-            if any(
-                not isinstance(item, list) or len(item) < 12
-                for item in raw
-            ):
-                raise MarketDataError(
-                    "Malformed kline row received"
-                )
-
-            rows = [
-                item[:12]
-                for item in raw
-            ]
-
-            df = pd.DataFrame(
-                rows,
-                columns=columns,
-            )
-
-            numeric_columns = [
-                "open",
-                "high",
-                "low",
-                "close",
-                "volume",
-                "quote_volume",
-                "trades",
-                "taker_buy_base",
-                "taker_buy_quote",
-                "open_time",
-                "close_time",
-            ]
-
-            for column in numeric_columns:
-
-                df[column] = pd.to_numeric(
-                    df[column],
-                    errors="coerce",
-                )
-
-            if df[numeric_columns].isna().any().any():
-                raise MarketDataError(
-                    "Kline response contains invalid numeric values"
-                )
-
-            for column in numeric_columns:
-
-                values = df[column].to_numpy(
-                    dtype=float
-                )
-
-                if not all(
-                    math.isfinite(float(value))
-                    for value in values
-                ):
-                    raise MarketDataError(
-                        f"Non-finite values in {column}"
-                    )
-
-            # Validate candle timestamps before sorting.
-            if (
-                (df["open_time"] < 0).any()
-                or (df["close_time"] <= df["open_time"]).any()
-            ):
-                raise MarketDataError(
-                    "Invalid candle timestamps"
-                )
-
-            if df["open_time"].duplicated().any():
-                raise MarketDataError(
-                    "Duplicate candle timestamps"
-                )
-
-            df = df.sort_values(
-                "open_time"
-            ).reset_index(drop=True)
-
-            # Validate chronological continuity.
-            if len(df) > 1 and interval_ms is not None:
-
-                differences = (
-                    df["open_time"]
-                    .diff()
-                    .dropna()
-                )
-
-                if not (differences == interval_ms).all():
-                    raise MarketDataError(
-                        "Missing or irregular candles detected"
-                    )
-
-            price_columns = [
-                "open",
-                "high",
-                "low",
-                "close",
-            ]
-
-            for column in price_columns:
-
-                if (df[column] <= 0).any():
-                    raise MarketDataError(
-                        f"Invalid prices in {column}"
-                    )
-
-            if (
-                (df["volume"] < 0).any()
-                or (df["quote_volume"] < 0).any()
-                or (df["trades"] < 0).any()
-                or (df["taker_buy_base"] < 0).any()
-                or (df["taker_buy_quote"] < 0).any()
-            ):
-                raise MarketDataError(
-                    "Negative volume or trade count"
-                )
-
-            invalid_ohlc = (
-                (df["high"] < df["low"])
-                | (df["high"] < df["open"])
-                | (df["high"] < df["close"])
-                | (df["low"] > df["open"])
-                | (df["low"] > df["close"])
-            )
-
-            if invalid_ohlc.any():
-                raise MarketDataError(
-                    "Invalid OHLC candle structure"
-                )
-
-            now_ms = int(
-                datetime.now(timezone.utc).timestamp() * 1000
-            )
-
-            # Keep completed candles only.
-            df = df[
-                df["close_time"] < now_ms
-            ].copy()
-
-            df = df.reset_index(
-                drop=True
-            )
-
-            if len(df) < 60:
-                raise MarketDataError(
-                    "Not enough completed candles"
-                )
-
-            # Reject stale data.
-            latest_close_time = int(
-                df.iloc[-1]["close_time"]
-            )
-
-            if interval_ms is not None:
-
-                maximum_age = max(
-                    interval_ms * 2,
-                    5 * 60 * 1000,
-                )
-
-                if now_ms - latest_close_time > maximum_age:
-                    raise MarketDataError(
-                        "Latest candle is stale"
-                    )
-
-            df["timestamp"] = pd.to_datetime(
-                df["open_time"],
-                unit="ms",
-                utc=True,
-            )
-
-            timestamp = self.utc_timestamp()
-
-            self.last_success[symbol] = timestamp
-            self.last_errors.pop(symbol, None)
-
-            return df
-
-        except asyncio.CancelledError:
-            raise
-
-        except Exception as exc:
-
-            self.record_error(symbol, exc)
-
-            logger.warning(
-                "Kline processing failed for %s: %s",
-                symbol,
-                exc,
-            )
-
-            if isinstance(exc, MarketDataError):
-                raise
-
-            raise MarketDataError(
-                f"Could not process klines for {symbol}"
-            ) from exc
-
-    # ========================================================
-    # MARKET SNAPSHOT
-    # ========================================================
-
-    async def get_market_snapshot(self, symbol):
-
-        if not self._valid_symbol(symbol):
-            raise MarketDataError(
-                "Invalid symbol"
-            )
-
-        try:
-
-            ticker, klines = await asyncio.gather(
-                self.get_ticker(symbol),
-                self.get_klines(symbol),
-            )
-
-            if (
-                not isinstance(klines, pd.DataFrame)
-                or klines.empty
-            ):
-                raise MarketDataError(
-                    "Invalid candle DataFrame"
-                )
-
-            latest_close = float(
-                klines.iloc[-1]["close"]
-            )
-
-            if (
-                not self.valid_number(latest_close)
-                or latest_close <= 0
-            ):
-                raise MarketDataError(
-                    "Invalid latest candle close"
-                )
-
-            return {
-                "symbol": symbol,
-                "price": ticker["price"],
-                "quote_volume": ticker["quote_volume"],
-                "change_percent": ticker["change_percent"],
-                "latest_candle_close": latest_close,
-                "candles": klines,
-                "klines": klines,
-                "timestamp": ticker["timestamp"],
-            }
-
-        except asyncio.CancelledError:
-            raise
-
-        except Exception as exc:
-
-            self.record_error(symbol, exc)
-
-            if isinstance(exc, MarketDataError):
-                raise
-
-            raise MarketDataError(
-                f"Could not create snapshot for {symbol}"
-            ) from exc
-
-    # ========================================================
-    # MARKET FILTER
-    # ========================================================
-
-    async def _check_liquidity(self, symbol):
-
-        async with self._symbol_semaphore:
-
-            try:
-
-                ticker = await self.get_ticker(
-                    symbol
-                )
-
-                return (
-                    symbol
-                    if ticker["quote_volume"] >= MIN_QUOTE_VOLUME
-                    else None
-                )
+                async with self._request_lock:
+                    elapsed = time.monotonic() - self._last_request_monotonic
+                    if elapsed < 1.05:
+                        await asyncio.sleep(1.05 - elapsed)
+
+                    async with session.get(url, params=params) as response:
+                        self._last_request_monotonic = time.monotonic()
+                        status = response.status
+                        text = await response.text()
+
+                    if status in (418, 429):
+                        raise MarketDataError(
+                            f"BingX rate limit response HTTP {status}: {text[:300]}"
+                        )
+
+                    if status >= 500:
+                        raise MarketDataError(
+                            f"BingX server error HTTP {status}: {text[:300]}"
+                        )
+
+                    if status != 200:
+                        raise MarketDataError(
+                            f"BingX HTTP {status}: {text[:500]}"
+                        )
+
+                    try:
+                        payload = await asyncio.to_thread(
+                            __import__("json").loads, text
+                        )
+                    except Exception as exc:
+                        raise MarketDataError(
+                            "BingX returned invalid JSON."
+                        ) from exc
+
+                    data = self._extract_data(payload)
+                    self.last_success = utc_timestamp()
+                    self.last_error = None
+                    return data
 
             except asyncio.CancelledError:
                 raise
 
-            except Exception:
+            except (aiohttp.ClientError, asyncio.TimeoutError, MarketDataError) as exc:
+                last_exception = exc
+                self.last_error = str(exc)
+                self.last_errors[endpoint] = str(exc)[:500]
 
-                logger.warning(
-                    "Liquidity check failed for %s",
-                    symbol,
-                    exc_info=True,
-                )
+                # Do not retry rate limits or ordinary client errors.
+                message = str(exc)
+                if "HTTP 418" in message or "HTTP 429" in message:
+                    break
+                if "BingX HTTP 4" in message:
+                    break
 
-                return None
+                if attempt < self._retry_attempts:
+                    await asyncio.sleep(min(2 ** attempt, 5))
 
-    async def get_liquid_symbols(self):
+            finally:
+                await self._release_session()
 
-        symbols = [
-            symbol
-            for symbol in SYMBOLS
-            if self._valid_symbol(symbol)
-        ]
-
-        results = await asyncio.gather(
-            *[
-                self._check_liquidity(symbol)
-                for symbol in symbols
-            ]
+        raise MarketDataError(
+            f"Unable to retrieve BingX data from {endpoint}: {last_exception}"
         )
 
-        return [
-            symbol
-            for symbol in results
-            if symbol is not None
-        ]
+    def _to_bingx_symbol(self, symbol):
+        if not isinstance(symbol, str):
+            raise MarketDataError("Symbol must be a string.")
 
-    # ========================================================
-    # SERVICE STATUS
-    # ========================================================
+        symbol = symbol.upper().strip()
 
-    def get_status(self):
+        mapped = self.symbol_map.get(symbol)
+        if mapped:
+            return mapped
+
+        # Accept an already formatted BASE-USDT symbol.
+        if "-" in symbol and symbol.endswith("-USDT"):
+            return symbol
+
+        # Convert compact quote symbols such as ADAUSDT to ADA-USDT.
+        if symbol.endswith("USDT") and len(symbol) > 4:
+            return f"{symbol[:-4]}-USDT"
+
+        raise MarketDataError(f"No BingX symbol mapping for {symbol}.")
+
+    @staticmethod
+    def _first_item(data, label):
+        if isinstance(data, list):
+            if not data:
+                raise MarketDataError(f"BingX returned empty {label} data.")
+            return data[0]
+
+        if isinstance(data, dict):
+            return data
+
+        raise MarketDataError(f"Unexpected BingX {label} response format.")
+
+    async def get_ticker(self, symbol):
+        bingx_symbol = self._to_bingx_symbol(symbol)
+
+        data = await self._request_json(
+            "/openApi/spot/v1/ticker/24hr",
+            {"symbol": bingx_symbol},
+        )
+
+        item = self._first_item(data, "ticker")
+
+        price = safe_float(item.get("lastPrice"))
+        quote_volume = safe_float(item.get("quoteVolume"))
+        change_percent = safe_float(item.get("priceChangePercent"), 0.0)
+
+        if price is None or price <= 0:
+            raise MarketDataError(
+                f"Invalid latest price for {symbol}."
+            )
+
+        if quote_volume is None or quote_volume < 0:
+            raise MarketDataError(
+                f"Invalid 24h quote volume for {symbol}."
+            )
+
+        exchange_time_ms = item.get("closeTime")
+        exchange_timestamp = None
+
+        if valid_number(exchange_time_ms):
+            try:
+                exchange_timestamp = datetime.fromtimestamp(
+                    float(exchange_time_ms) / 1000.0,
+                    tz=timezone.utc,
+                ).isoformat()
+            except (ValueError, OSError, OverflowError):
+                exchange_timestamp = None
+
+        # timestamp is local receipt time for PaperTrader's freshness check.
+        return {
+            "symbol": symbol,
+            "provider_symbol": bingx_symbol,
+            "price": price,
+            "quote_volume": quote_volume,
+            "change_percent": change_percent,
+            "timestamp": utc_timestamp(),
+            "exchange_timestamp": exchange_timestamp,
+            "source": "BingX Spot",
+        }
+
+    async def get_klines(self, symbol, interval=None, limit=None):
+        bingx_symbol = self._to_bingx_symbol(symbol)
+        interval = interval or self.timeframe
+        limit = int(limit or self.kline_limit)
+
+        if interval not in self.INTERVALS:
+            raise MarketDataError(
+                f"Unsupported BingX kline interval: {interval}"
+            )
+
+        if limit < 1 or limit > 1440:
+            raise MarketDataError("BingX kline limit must be between 1 and 1440.")
+
+        data = await self._request_json(
+            "/openApi/spot/v2/market/kline",
+            {
+                "symbol": bingx_symbol,
+                "interval": interval,
+                "limit": limit,
+            },
+        )
+
+        if not isinstance(data, list) or not data:
+            raise MarketDataError(
+                f"No kline data returned for {symbol}."
+            )
+
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        rows = []
+        seen = set()
+
+        for candle in data:
+            if not isinstance(candle, (list, tuple)) or len(candle) < 7:
+                continue
+
+            try:
+                open_time = int(candle[0])
+                open_price = float(candle[1])
+                high_price = float(candle[2])
+                low_price = float(candle[3])
+                close_price = float(candle[4])
+                volume = float(candle[5])
+                close_time = int(candle[6])
+                quote_volume = (
+                    float(candle[7])
+                    if len(candle) > 7 and valid_number(candle[7])
+                    else 0.0
+                )
+            except (TypeError, ValueError, OverflowError):
+                continue
+
+            values = (
+                open_price, high_price, low_price,
+                close_price, volume, quote_volume,
+            )
+
+            if not all(valid_number(value) for value in values):
+                continue
+
+            if min(open_price, high_price, low_price, close_price) <= 0:
+                continue
+
+            if volume < 0 or quote_volume < 0:
+                continue
+
+            if high_price < max(open_price, close_price, low_price):
+                continue
+
+            if low_price > min(open_price, close_price, high_price):
+                continue
+
+            # Exclude the currently forming candle.
+            if close_time >= now_ms:
+                continue
+
+            if open_time in seen:
+                continue
+
+            seen.add(open_time)
+
+            rows.append({
+                "timestamp": pd.to_datetime(
+                    open_time, unit="ms", utc=True
+                ),
+                "open": open_price,
+                "high": high_price,
+                "low": low_price,
+                "close": close_price,
+                "volume": volume,
+                "quote_volume": quote_volume,
+                "close_time": pd.to_datetime(
+                    close_time, unit="ms", utc=True
+                ),
+            })
+
+        if len(rows) < 60:
+            raise MarketDataError(
+                f"Not enough valid completed candles for {symbol}: {len(rows)}."
+            )
+
+        frame = pd.DataFrame(rows)
+        frame = frame.sort_values("timestamp")
+        frame = frame.drop_duplicates(
+            subset=["timestamp"], keep="last"
+        ).reset_index(drop=True)
+
+        if frame.empty:
+            raise MarketDataError(f"Empty validated candle frame for {symbol}.")
+
+        # Reject candles that are too old for the configured interval.
+        latest_close = frame["close_time"].iloc[-1]
+        age_seconds = (
+            datetime.now(timezone.utc) - latest_close.to_pydatetime()
+        ).total_seconds()
+
+        interval_seconds = {
+            "1m": 60, "3m": 180, "5m": 300, "15m": 900,
+            "30m": 1800, "1h": 3600, "2h": 7200,
+            "4h": 14400, "6h": 21600, "8h": 28800,
+            "12h": 43200, "1d": 86400, "3d": 259200,
+            "1w": 604800,
+        }
+
+        max_age = interval_seconds.get(interval, 31 * 86400) * 3
+        if age_seconds < 0 or age_seconds > max_age:
+            raise MarketDataError(
+                f"Latest BingX candle for {symbol} is stale "
+                f"({age_seconds:.0f} seconds old)."
+            )
+
+        return frame
+
+    async def get_market_snapshot(self, symbol):
+        ticker, candles = await asyncio.gather(
+            self.get_ticker(symbol),
+            self.get_klines(symbol),
+        )
+
+        latest_candle = candles.iloc[-1]
 
         return {
-            "service": "market_data",
-            "running": (
-                self.session is not None
-                and not self.session.closed
-                and not self._closing
-            ),
+            "symbol": symbol,
+            "price": ticker["price"],
+            "quote_volume": ticker["quote_volume"],
+            "change_percent": ticker["change_percent"],
+            "timestamp": ticker["timestamp"],
+            "exchange_timestamp": ticker.get("exchange_timestamp"),
+            "latest_candle_close": float(latest_candle["close"]),
+            "candles": candles,
+            "klines": candles,
+            "source": "BingX Spot",
+        }
+
+    def _check_liquidity(self, ticker):
+        volume = safe_float(ticker.get("quote_volume"))
+        return volume is not None and volume >= self.min_quote_volume
+
+    async def get_liquid_symbols(self):
+        """
+        Return configured symbols whose 24h quote volume passes the
+        configured threshold. This avoids scanning unconfigured pairs.
+        """
+        results = []
+
+        for symbol in self.symbols:
+            try:
+                ticker = await self.get_ticker(symbol)
+                if self._check_liquidity(ticker):
+                    results.append(symbol)
+            except MarketDataError as exc:
+                logger.warning(
+                    "Skipping %s during liquidity check: %s",
+                    symbol, exc,
+                )
+
+        return results
+
+    def get_status(self):
+        session_running = (
+            self._session is not None
+            and not self._session.closed
+            and not self._closing
+        )
+
+        return {
+            "service": "BingX Spot Public Market Data",
+            "provider": "bingx",
+            "running": session_running,
             "active_requests": self._active_requests,
-            "last_success": dict(
-                self.last_success
-            ),
-            "last_errors": dict(
-                self.last_errors
-            ),
+            "last_success": self.last_success,
+            "last_error": self.last_error,
+            "last_errors": dict(self.last_errors),
+            "closing": self._closing,
+            "authenticated": False,
+            "trading_enabled": False,
         }
