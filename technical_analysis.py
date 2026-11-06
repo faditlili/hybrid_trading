@@ -6,7 +6,6 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-
 REQUIRED_COLUMNS = [
     "open",
     "high",
@@ -15,384 +14,373 @@ REQUIRED_COLUMNS = [
     "volume",
 ]
 
-
 MIN_CANDLES = 61
 
 
-def _is_valid(value):
+# ============================================================
+# VALIDATION
+# ============================================================
 
+def _is_valid(value):
     if isinstance(value, bool):
         return False
 
     try:
         return math.isfinite(float(value))
-
     except (TypeError, ValueError, OverflowError):
         return False
 
 
-def _validate_ohlcv(data):
-
-    if data.empty:
-        return False
-
-    required = data[REQUIRED_COLUMNS]
-
-    if required.isna().any().any():
-        return False
-
-    for column in REQUIRED_COLUMNS:
-
-        values = required[column].to_numpy(
-            dtype=float
-        )
-
-        if not all(
-            math.isfinite(float(value))
-            for value in values
-        ):
-            return False
-
-    invalid = (
-        (data["open"] <= 0)
-        | (data["high"] <= 0)
-        | (data["low"] <= 0)
-        | (data["close"] <= 0)
-        | (data["volume"] < 0)
-        | (data["high"] < data["low"])
-        | (data["high"] < data["open"])
-        | (data["high"] < data["close"])
-        | (data["low"] > data["open"])
-        | (data["low"] > data["close"])
-    )
-
-    return not invalid.any()
-
-
-def _prepare_data(df):
-
+def _validate_data(df):
     if not isinstance(df, pd.DataFrame):
+        return None
+
+    if not all(col in df.columns for col in REQUIRED_COLUMNS):
         return None
 
     if len(df) < MIN_CANDLES:
         return None
 
+    data = df[REQUIRED_COLUMNS].copy()
+
+    for col in REQUIRED_COLUMNS:
+        data[col] = pd.to_numeric(
+            data[col],
+            errors="coerce",
+        )
+
+    if data.isna().any().any():
+        return None
+
     if not all(
-        column in df.columns
-        for column in REQUIRED_COLUMNS
+        math.isfinite(float(v))
+        for v in data.to_numpy().flatten()
     ):
         return None
 
-    data = df.copy()
-
-    for column in REQUIRED_COLUMNS:
-
-        data[column] = pd.to_numeric(
-            data[column],
-            errors="coerce",
-        )
-
-    data = data.dropna(
-        subset=REQUIRED_COLUMNS
-    )
-
-    # Sort and remove duplicate candles.
-    if "open_time" in data.columns:
-
-        data["open_time"] = pd.to_numeric(
-            data["open_time"],
-            errors="coerce",
-        )
-
-        data = data.dropna(
-            subset=["open_time"]
-        )
-
-        data = data.sort_values(
-            "open_time"
-        )
-
-        data = data.drop_duplicates(
-            subset=["open_time"],
-            keep="last",
-        )
-
-    elif "close_time" in data.columns:
-
-        if pd.api.types.is_datetime64_any_dtype(
-            data["close_time"]
-        ):
-
-            if data["close_time"].dt.tz is None:
-
-                data["close_time"] = (
-                    data["close_time"].dt.tz_localize("UTC")
-                )
-
-            else:
-
-                data["close_time"] = (
-                    data["close_time"].dt.tz_convert("UTC")
-                )
-
-        else:
-
-            close_time_numeric = pd.to_numeric(
-                data["close_time"],
-                errors="coerce",
-            )
-
-            data["close_time"] = pd.to_datetime(
-                close_time_numeric,
-                unit="ms",
-                utc=True,
-                errors="coerce",
-            )
-
-        data = data.dropna(
-            subset=["close_time"]
-        )
-
-        data = data.sort_values(
-            "close_time"
-        )
-
-        data = data.drop_duplicates(
-            subset=["close_time"],
-            keep="last",
-        )
-
-    else:
-
-        data = data[
-            ~data.index.duplicated(keep="last")
-        ]
-
-    # Exclude incomplete candles.
-    if "close_time" in data.columns:
-
-        now = pd.Timestamp.now(
-            tz="UTC"
-        )
-
-        data = data[
-            data["close_time"] < now
-        ]
-
-    else:
-
-        # Without timestamps, conservatively exclude
-        # the final potentially incomplete candle.
-        data = data.iloc[:-1]
-
-    data = data.reset_index(
-        drop=True
-    )
-
-    if len(data) < 60:
+    if (data["open"] <= 0).any():
         return None
 
-    if not _validate_ohlcv(data):
+    if (data["high"] <= 0).any():
         return None
 
-    return data
+    if (data["low"] <= 0).any():
+        return None
 
+    if (data["close"] <= 0).any():
+        return None
+
+    if (data["volume"] < 0).any():
+        return None
+
+    if (data["high"] < data["low"]).any():
+        return None
+
+    if (
+        data["high"]
+        < data[["open", "close"]].max(axis=1)
+    ).any():
+        return None
+
+    if (
+        data["low"]
+        > data[["open", "close"]].min(axis=1)
+    ).any():
+        return None
+
+    return data.reset_index(drop=True)
+
+
+# ============================================================
+# INDICATORS
+# ============================================================
+
+def _calculate_rsi(close, period=14):
+    delta = close.diff()
+
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.ewm(
+        alpha=1 / period,
+        min_periods=period,
+        adjust=False,
+    ).mean()
+
+    avg_loss = loss.ewm(
+        alpha=1 / period,
+        min_periods=period,
+        adjust=False,
+    ).mean()
+
+    rs = avg_gain / avg_loss.replace(0, float("nan"))
+
+    rsi = 100 - (100 / (1 + rs))
+
+    rsi = rsi.mask(
+        (avg_loss == 0) & (avg_gain > 0),
+        100,
+    )
+
+    rsi = rsi.mask(
+        (avg_loss == 0) & (avg_gain == 0),
+        50,
+    )
+
+    return rsi
+
+
+def _calculate_macd(close):
+    ema12 = close.ewm(
+        span=12,
+        adjust=False,
+    ).mean()
+
+    ema26 = close.ewm(
+        span=26,
+        adjust=False,
+    ).mean()
+
+    macd = ema12 - ema26
+
+    signal = macd.ewm(
+        span=9,
+        adjust=False,
+    ).mean()
+
+    histogram = macd - signal
+
+    return macd, signal, histogram
+
+
+def _calculate_atr(data, period=14):
+    previous_close = data["close"].shift(1)
+
+    tr = pd.concat(
+        [
+            data["high"] - data["low"],
+            (data["high"] - previous_close).abs(),
+            (data["low"] - previous_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+
+    return tr.ewm(
+        alpha=1 / period,
+        min_periods=period,
+        adjust=False,
+    ).mean()
+
+
+# ============================================================
+# CANDLE PATTERNS
+# ============================================================
+
+def _detect_candle_patterns(data):
+    current = data.iloc[-1]
+    previous = data.iloc[-2]
+
+    body = abs(current["close"] - current["open"])
+
+    candle_range = current["high"] - current["low"]
+
+    if candle_range <= 0:
+        return []
+
+    upper_shadow = (
+        current["high"]
+        - max(current["open"], current["close"])
+    )
+
+    lower_shadow = (
+        min(current["open"], current["close"])
+        - current["low"]
+    )
+
+    bullish = current["close"] > current["open"]
+    bearish = current["close"] < current["open"]
+
+    patterns = []
+
+    # Doji
+    if body <= candle_range * 0.10:
+        patterns.append("DOJI")
+
+    # Hammer
+    if (
+        lower_shadow >= body * 2
+        and upper_shadow <= candle_range * 0.20
+        and body > 0
+    ):
+        patterns.append("HAMMER")
+
+    # Shooting Star
+    if (
+        upper_shadow >= body * 2
+        and lower_shadow <= candle_range * 0.20
+        and body > 0
+    ):
+        patterns.append("SHOOTING_STAR")
+
+    # Bullish Engulfing
+    if (
+        bullish
+        and previous["close"] < previous["open"]
+        and current["open"] <= previous["close"]
+        and current["close"] >= previous["open"]
+    ):
+        patterns.append("BULLISH_ENGULFING")
+
+    # Bearish Engulfing
+    if (
+        bearish
+        and previous["close"] > previous["open"]
+        and current["open"] >= previous["close"]
+        and current["close"] <= previous["open"]
+    ):
+        patterns.append("BEARISH_ENGULFING")
+
+    return patterns
+
+
+# ============================================================
+# MARKET ANALYSIS
+# ============================================================
 
 def calculate_indicators(df):
 
+    data = _validate_data(df)
+
+    if data is None:
+        logger.warning("Invalid OHLCV market data")
+        return None
+
     try:
+        close = data["close"]
 
-        data = _prepare_data(df)
-
-        if data is None:
-            return None
-
-        # ====================================================
         # EMA
-        # ====================================================
+        for period in [9, 21, 50, 200]:
+            data[f"ema_{period}"] = close.ewm(
+                span=period,
+                adjust=False,
+            ).mean()
 
-        data["ema9"] = data["close"].ewm(
-            span=9,
-            adjust=False,
-        ).mean()
+        # RSI
+        data["rsi"] = _calculate_rsi(close)
 
-        data["ema21"] = data["close"].ewm(
-            span=21,
-            adjust=False,
-        ).mean()
-
-        data["ema50"] = data["close"].ewm(
-            span=50,
-            adjust=False,
-        ).mean()
-
-        # ====================================================
-        # RSI - Wilder smoothing
-        # ====================================================
-
-        delta = data["close"].diff()
-
-        gain = delta.clip(
-            lower=0
-        )
-
-        loss = -delta.clip(
-            upper=0
-        )
-
-        avg_gain = gain.ewm(
-            alpha=1 / 14,
-            adjust=False,
-            min_periods=14,
-        ).mean()
-
-        avg_loss = loss.ewm(
-            alpha=1 / 14,
-            adjust=False,
-            min_periods=14,
-        ).mean()
-
-        rs = avg_gain / avg_loss.replace(
-            0,
-            float("nan"),
-        )
-
-        data["rsi"] = 100 - (
-            100 / (1 + rs)
-        )
-
-        # No losses: RSI = 100.
-        data.loc[
-            (avg_loss == 0) & (avg_gain > 0),
-            "rsi",
-        ] = 100
-
-        # No gains and no losses: neutral RSI.
-        data.loc[
-            (avg_loss == 0) & (avg_gain == 0),
-            "rsi",
-        ] = 50
-
-        # ====================================================
-        # ATR - Wilder smoothing
-        # ====================================================
-
-        previous_close = data["close"].shift(1)
-
-        tr1 = (
-            data["high"] - data["low"]
-        )
-
-        tr2 = (
-            data["high"] - previous_close
-        ).abs()
-
-        tr3 = (
-            data["low"] - previous_close
-        ).abs()
-
-        true_range = pd.concat(
-            [tr1, tr2, tr3],
-            axis=1,
-        ).max(axis=1)
-
-        data["atr"] = true_range.ewm(
-            alpha=1 / 14,
-            adjust=False,
-            min_periods=14,
-        ).mean()
-
-        # ====================================================
         # MACD
-        # ====================================================
+        (
+            data["macd"],
+            data["macd_signal"],
+            data["macd_histogram"],
+        ) = _calculate_macd(close)
 
-        ema12 = data["close"].ewm(
-            span=12,
-            adjust=False,
-        ).mean()
+        # ATR
+        data["atr"] = _calculate_atr(data)
 
-        ema26 = data["close"].ewm(
-            span=26,
-            adjust=False,
-        ).mean()
+        # Bollinger Bands
+        middle = close.rolling(20).mean()
+        std = close.rolling(20).std(ddof=0)
 
-        data["macd"] = ema12 - ema26
+        data["bb_middle"] = middle
+        data["bb_upper"] = middle + (2 * std)
+        data["bb_lower"] = middle - (2 * std)
 
-        data["macd_signal"] = data["macd"].ewm(
-            span=9,
-            adjust=False,
-        ).mean()
-
-        # ====================================================
-        # VOLUME
-        # ====================================================
-
-        # Exclude current candle from the reference average.
-        data["volume_avg"] = (
-            data["volume"]
-            .shift(1)
-            .rolling(
-                window=20,
-                min_periods=20,
-            )
-            .mean()
+        # Volume analysis
+        data["volume_sma"] = (
+            data["volume"].rolling(20).mean()
         )
 
-        # ====================================================
-        # FINAL VALUES
-        # ====================================================
+        data["volume_ratio"] = (
+            data["volume"]
+            / data["volume_sma"].replace(0, float("nan"))
+        )
 
+        # Candle patterns
+        patterns = _detect_candle_patterns(data)
+
+        # Market trend
         latest = data.iloc[-1]
-        previous = data.iloc[-2]
 
+        if (
+            latest["ema_9"] > latest["ema_21"]
+            and latest["ema_21"] > latest["ema_50"]
+            and latest["close"] > latest["ema_50"]
+        ):
+            trend = "BULLISH"
+
+        elif (
+            latest["ema_9"] < latest["ema_21"]
+            and latest["ema_21"] < latest["ema_50"]
+            and latest["close"] < latest["ema_50"]
+        ):
+            trend = "BEARISH"
+
+        else:
+            trend = "SIDEWAYS"
+
+        # Momentum
+        if latest["rsi"] >= 55:
+            momentum = "BULLISH"
+
+        elif latest["rsi"] <= 45:
+            momentum = "BEARISH"
+
+        else:
+            momentum = "NEUTRAL"
+
+        # MACD direction
+        if latest["macd"] > latest["macd_signal"]:
+            macd_trend = "BULLISH"
+
+        elif latest["macd"] < latest["macd_signal"]:
+            macd_trend = "BEARISH"
+
+        else:
+            macd_trend = "NEUTRAL"
+
+        # Final result
         result = {
-            "price": float(latest["close"]),
-            "ema9": float(latest["ema9"]),
-            "ema21": float(latest["ema21"]),
-            "ema50": float(latest["ema50"]),
+            "data": data,
+            "trend": trend,
+            "momentum": momentum,
+            "macd_trend": macd_trend,
+            "patterns": patterns,
+            "close": float(latest["close"]),
             "rsi": float(latest["rsi"]),
             "atr": float(latest["atr"]),
+            "ema_9": float(latest["ema_9"]),
+            "ema_21": float(latest["ema_21"]),
+            "ema_50": float(latest["ema_50"]),
+            "ema_200": float(latest["ema_200"]),
             "macd": float(latest["macd"]),
             "macd_signal": float(latest["macd_signal"]),
-            "volume": float(latest["volume"]),
-            "volume_avg": float(latest["volume_avg"]),
-            "previous_close": float(previous["close"]),
+            "macd_histogram": float(
+                latest["macd_histogram"]
+            ),
+            "bb_upper": float(latest["bb_upper"]),
+            "bb_middle": float(latest["bb_middle"]),
+            "bb_lower": float(latest["bb_lower"]),
+            "volume_ratio": (
+                float(latest["volume_ratio"])
+                if _is_valid(latest["volume_ratio"])
+                else 0.0
+            ),
         }
 
-        # ====================================================
-        # VALIDATION
-        # ====================================================
+        for key, value in result.items():
+            if key == "data":
+                continue
 
-        if not all(
-            _is_valid(value)
-            for value in result.values()
-        ):
-            return None
-
-        if result["price"] <= 0:
-            return None
-
-        if result["previous_close"] <= 0:
-            return None
-
-        if result["atr"] <= 0:
-            return None
-
-        if not 0 <= result["rsi"] <= 100:
-            return None
-
-        if result["volume"] < 0:
-            return None
-
-        if result["volume_avg"] < 0:
-            return None
+            if isinstance(value, float) and not _is_valid(value):
+                logger.warning(
+                    "Invalid indicator result: %s",
+                    key,
+                )
+                return None
 
         return result
 
     except Exception:
-
-        logger.exception(
-            "Technical analysis failed"
-        )
-
+        logger.exception("Technical analysis failed")
         return None
