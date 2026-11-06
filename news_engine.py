@@ -1,3 +1,4 @@
+
 import asyncio
 import aiohttp
 import logging
@@ -18,7 +19,6 @@ FEED_URLS = [
 class NewsEngine:
 
     def __init__(self):
-
         self.session = None
         self.latest_news = []
 
@@ -49,19 +49,9 @@ class NewsEngine:
         if not value:
             return ""
 
-        value = re.sub(
-            r"<[^>]+>",
-            " ",
-            value
-        )
-
+        value = re.sub(r"<[^>]+>", " ", value)
         value = unescape(value)
-
-        value = re.sub(
-            r"\s+",
-            " ",
-            value
-        )
+        value = re.sub(r"\s+", " ", value)
 
         return value.strip()
 
@@ -75,11 +65,9 @@ class NewsEngine:
             async with self.session.get(url) as response:
 
                 response.raise_for_status()
-
                 content = await response.text()
 
             root = ET.fromstring(content)
-
             items = root.findall(".//item")
 
             news = []
@@ -161,7 +149,7 @@ class NewsEngine:
 
         return self.latest_news
 
-        async def get_news(self, limit=20):
+    async def get_news(self, limit=20):
 
         if not isinstance(limit, int):
             limit = 20
