@@ -1,5 +1,9 @@
+
+import html
+import logging
 import gradio as gr
-from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 
 CSS = """
@@ -72,8 +76,28 @@ button {
 """
 
 
+def safe_float(value):
+    try:
+        number = float(value)
+
+        if not __import__("math").isfinite(number):
+            return 0.0
+
+        return number
+
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def money(value):
-    return f"{float(value):.4f} USDT"
+    return f"{safe_float(value):.4f} USDT"
+
+
+def safe_text(value):
+    return html.escape(
+        str(value if value is not None else ""),
+        quote=True
+    ).replace("|", "&#124;").replace("\n", " ")
 
 
 def build_dashboard(controller):
@@ -92,47 +116,67 @@ def build_dashboard(controller):
             else "STOPPED"
         )
 
-        last_scan = (
-            engine.last_scan
-            or "Not scanned yet"
+        last_scan = safe_text(
+            engine.last_scan or "Not scanned yet"
         )
 
-        regime = engine.market_regime
+        regime = safe_text(
+            engine.market_regime or "UNKNOWN"
+        )
+
+        last_error = safe_text(
+            engine.last_error or ""
+        )
 
         account_html = f"""
-        <div style="display:grid;
-                    grid-template-columns:repeat(2,minmax(0,1fr));
-                    gap:10px;">
+        <div style="
+            display:grid;
+            grid-template-columns:repeat(2,minmax(0,1fr));
+            gap:10px;
+        ">
 
             <div class="metric">
                 <div class="metric-label">AVAILABLE BALANCE</div>
-                <div class="metric-value">{money(summary['balance'])}</div>
+                <div class="metric-value">
+                    {money(summary['balance'])}
+                </div>
             </div>
 
             <div class="metric">
                 <div class="metric-label">TOTAL EQUITY</div>
-                <div class="metric-value">{money(summary['equity'])}</div>
+                <div class="metric-value">
+                    {money(summary['equity'])}
+                </div>
             </div>
 
             <div class="metric">
                 <div class="metric-label">REALIZED P/L</div>
-                <div class="metric-value">{money(summary['realized_pnl'])}</div>
+                <div class="metric-value">
+                    {money(summary['realized_pnl'])}
+                </div>
             </div>
 
             <div class="metric">
                 <div class="metric-label">UNREALIZED P/L</div>
-                <div class="metric-value">{money(summary['unrealized_pnl'])}</div>
+                <div class="metric-value">
+                    {money(summary['unrealized_pnl'])}
+                </div>
             </div>
 
             <div class="metric">
                 <div class="metric-label">RESERVED CAPITAL</div>
-                <div class="metric-value">{money(summary['reserved'])}</div>
+                <div class="metric-value">
+                    {money(summary['reserved'])}
+                </div>
             </div>
 
             <div class="metric">
                 <div class="metric-label">WIN RATE</div>
-                <div class="metric-value">{summary['win_rate']:.1f}%</div>
+                <div class="metric-value">
+                    {safe_float(summary['win_rate']):.1f}%
+                </div>
             </div>
+
         </div>
         """
 
@@ -140,14 +184,17 @@ def build_dashboard(controller):
         <div class="metric">
             <div class="status">SYSTEM: {status}</div>
             <div>MARKET REGIME: {regime}</div>
+
             <div style="font-size:12px;color:#8ba8c1;">
                 LAST SCAN: {last_scan}
             </div>
+
             <div style="font-size:12px;color:#8ba8c1;">
                 MODE: PAPER TRADING ONLY
             </div>
+
             <div style="font-size:12px;color:#ffb86b;">
-                {engine.last_error or ""}
+                {last_error}
             </div>
         </div>
         """
@@ -161,10 +208,10 @@ def build_dashboard(controller):
             for p in positions:
 
                 position_rows.append(
-                    f"| {p['symbol']} "
-                    f"| {float(p['entry_price']):.6f} "
-                    f"| {float(p['current_price']):.6f} "
-                    f"| {float(p['unrealized_pnl']):.4f} |"
+                    f"| {safe_text(p['symbol'])} "
+                    f"| {safe_float(p['entry_price']):.6f} "
+                    f"| {safe_float(p['current_price']):.6f} "
+                    f"| {safe_float(p['unrealized_pnl']):.4f} |"
                 )
 
             positions_md = (
@@ -185,10 +232,10 @@ def build_dashboard(controller):
             for d in decisions:
 
                 decision_rows.append(
-                    f"| {d['symbol']} "
-                    f"| {d['action']} "
-                    f"| {d['score']} "
-                    f"| {d.get('ai_vote', 'N/A')} |"
+                    f"| {safe_text(d['symbol'])} "
+                    f"| {safe_text(d['action'])} "
+                    f"| {safe_float(d['score']):.0f} "
+                    f"| {safe_text(d.get('ai_vote', 'N/A'))} |"
                 )
 
             decisions_md = (
@@ -209,11 +256,11 @@ def build_dashboard(controller):
             for t in trades:
 
                 trade_rows.append(
-                    f"| {t['symbol']} "
-                    f"| {float(t['entry_price']):.6f} "
-                    f"| {float(t['exit_price']):.6f} "
-                    f"| {float(t['net_pnl']):.4f} "
-                    f"| {t['reason']} |"
+                    f"| {safe_text(t['symbol'])} "
+                    f"| {safe_float(t['entry_price']):.6f} "
+                    f"| {safe_float(t['exit_price']):.6f} "
+                    f"| {safe_float(t['net_pnl']):.4f} "
+                    f"| {safe_text(t['reason'])} |"
                 )
 
             trades_md = (
@@ -235,11 +282,32 @@ def build_dashboard(controller):
 
     async def force_scan():
 
-        results = await controller.engine.scan_once()
+        engine = controller.engine
 
-        message = (
-            f"اكتمل الفحص. عدد النتائج: {len(results)}"
-        )
+        if engine.scan_lock.locked():
+
+            return (
+                "الفحص جارٍ بالفعل.",
+                *get_dashboard()
+            )
+
+        try:
+
+            results = await engine.scan_once()
+
+            message = (
+                f"اكتمل الفحص. عدد النتائج: {len(results)}"
+            )
+
+        except Exception:
+
+            logger.exception(
+                "Dashboard manual scan failed"
+            )
+
+            message = (
+                "تعذر إكمال الفحص. راجع سجل النظام."
+            )
 
         return message, *get_dashboard()
 
@@ -250,16 +318,17 @@ def build_dashboard(controller):
 
         gr.HTML("""
         <div id="main-title">AI QUANT</div>
+
         <div class="subtitle">
             AUTONOMOUS MARKET ANALYSIS SYSTEM
         </div>
+
         <div class="subtitle">
             SIMULATION MODE · NO REAL ORDERS
         </div>
         """)
 
-        with gr.Row():
-            account = gr.HTML()
+        account = gr.HTML()
 
         status = gr.HTML()
 
@@ -286,38 +355,34 @@ def build_dashboard(controller):
             interactive=False
         )
 
+        outputs = [
+            account,
+            status,
+            positions,
+            decisions,
+            trades
+        ]
+
         scan_button.click(
             force_scan,
-            outputs=[
-                message,
-                account,
-                status,
-                positions,
-                decisions,
-                trades
-            ]
+            outputs=[message] + outputs
         )
 
         refresh_button.click(
             get_dashboard,
-            outputs=[
-                account,
-                status,
-                positions,
-                decisions,
-                trades
-            ]
+            outputs=outputs
         )
 
         demo.load(
             get_dashboard,
-            outputs=[
-                account,
-                status,
-                positions,
-                decisions,
-                trades
-            ]
+            outputs=outputs
+        )
+
+        timer = gr.Timer(15)
+
+        timer.tick(
+            get_dashboard,
+            outputs=outputs
         )
 
     return demo
