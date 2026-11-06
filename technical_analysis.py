@@ -17,7 +17,6 @@ REQUIRED_COLUMNS = [
 
 
 def _is_valid(value):
-
     try:
         return math.isfinite(float(value))
     except (TypeError, ValueError, OverflowError):
@@ -42,18 +41,45 @@ def calculate_indicators(df):
 
         data = df.copy()
 
+        # Convert OHLCV columns to numeric values
         for column in REQUIRED_COLUMNS:
             data[column] = pd.to_numeric(
                 data[column],
                 errors="coerce"
             )
 
+        # Remove missing and infinite OHLCV values
+        for column in REQUIRED_COLUMNS:
+            data = data[
+                data[column].map(_is_valid)
+            ]
+
         data = data.dropna(
             subset=REQUIRED_COLUMNS
         )
 
-        # Handle Binance close_time correctly
-        if "close_time" in data.columns:
+        # Sort candles chronologically
+        if "open_time" in data.columns:
+
+            data["open_time"] = pd.to_numeric(
+                data["open_time"],
+                errors="coerce"
+            )
+
+            data = data.dropna(
+                subset=["open_time"]
+            )
+
+            data = data.sort_values(
+                "open_time"
+            )
+
+            data = data.drop_duplicates(
+                subset=["open_time"],
+                keep="last"
+            )
+
+        elif "close_time" in data.columns:
 
             if pd.api.types.is_datetime64_any_dtype(
                 data["close_time"]
@@ -86,6 +112,23 @@ def calculate_indicators(df):
                 subset=["close_time"]
             )
 
+            data = data.sort_values(
+                "close_time"
+            )
+
+            data = data.drop_duplicates(
+                subset=["close_time"],
+                keep="last"
+            )
+
+        else:
+
+            # Without candle timestamps, preserve the supplied order.
+            data = data[~data.index.duplicated(keep="last")]
+
+        # Exclude incomplete candles
+        if "close_time" in data.columns:
+
             now = pd.Timestamp.now(tz="UTC")
 
             data = data[
@@ -94,13 +137,13 @@ def calculate_indicators(df):
 
         else:
 
-            # Exclude potentially incomplete last candle
+            # Conservatively exclude the final candle
             data = data.iloc[:-1]
 
         if len(data) < 60:
             return None
 
-        # Validate OHLCV
+        # Validate OHLCV relationships
         valid_ohlc = (
             (data["open"] > 0)
             & (data["high"] > 0)
@@ -119,7 +162,7 @@ def calculate_indicators(df):
         if len(data) < 60:
             return None
 
-        # EMA
+        # EMA indicators
         data["ema9"] = data["close"].ewm(
             span=9,
             adjust=False
@@ -162,6 +205,7 @@ def calculate_indicators(df):
             100 / (1 + rs)
         )
 
+        # Handle zero-loss cases
         data.loc[
             (avg_loss == 0) & (avg_gain > 0),
             "rsi"
@@ -176,8 +220,14 @@ def calculate_indicators(df):
         previous_close = data["close"].shift(1)
 
         tr1 = data["high"] - data["low"]
-        tr2 = (data["high"] - previous_close).abs()
-        tr3 = (data["low"] - previous_close).abs()
+
+        tr2 = (
+            data["high"] - previous_close
+        ).abs()
+
+        tr3 = (
+            data["low"] - previous_close
+        ).abs()
 
         true_range = pd.concat(
             [tr1, tr2, tr3],
@@ -208,7 +258,7 @@ def calculate_indicators(df):
             adjust=False
         ).mean()
 
-        # Volume average
+        # Average volume
         data["volume_avg"] = data["volume"].rolling(
             window=20,
             min_periods=20
@@ -231,16 +281,23 @@ def calculate_indicators(df):
             "previous_close": float(previous["close"])
         }
 
+        # Validate all final indicators
         if not all(
             _is_valid(value)
             for value in result.values()
         ):
             return None
 
-        if result["price"] <= 0 or result["atr"] <= 0:
+        if result["price"] <= 0:
+            return None
+
+        if result["atr"] <= 0:
             return None
 
         if not 0 <= result["rsi"] <= 100:
+            return None
+
+        if result["volume"] < 0:
             return None
 
         if result["volume_avg"] < 0:
