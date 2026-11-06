@@ -1,66 +1,120 @@
+import math
+from datetime import datetime, timezone
+
 import pandas as pd
 
 
-def calculate_indicators(candles):
+def _is_valid(value):
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
 
-    if candles is None or len(candles) < 61:
-        raise ValueError("Not enough candle data")
 
-    # تجاهل الشمعة الأخيرة غير المكتملة
-    df = candles.iloc[:-1].copy().reset_index(drop=True)
+def calculate_indicators(df):
 
-    close = df["close"]
-    high = df["high"]
-    low = df["low"]
+    required = [
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume"
+    ]
 
-    df["ema9"] = close.ewm(
+    if df is None or len(df) < 61:
+        return None
+
+    if any(column not in df.columns for column in required):
+        return None
+
+    data = df.copy()
+
+    for column in required:
+        data[column] = pd.to_numeric(
+            data[column],
+            errors="coerce"
+        )
+
+    data = data.dropna(subset=required)
+
+    # استعمال الشموع المغلقة فقط
+    if "close_time" in data.columns:
+        now_ms = datetime.now(timezone.utc).timestamp() * 1000
+
+        data["close_time"] = pd.to_numeric(
+            data["close_time"],
+            errors="coerce"
+        )
+
+        data = data[
+            data["close_time"] < now_ms
+        ]
+
+    else:
+        data = data.iloc[:-1]
+
+    data = data.reset_index(drop=True)
+
+    if len(data) < 60:
+        return None
+
+    close = data["close"]
+    high = data["high"]
+    low = data["low"]
+    volume = data["volume"]
+
+    if (close <= 0).any():
+        return None
+
+    # EMA
+    ema9 = close.ewm(
         span=9,
         adjust=False
     ).mean()
 
-    df["ema21"] = close.ewm(
+    ema21 = close.ewm(
         span=21,
         adjust=False
     ).mean()
 
-    df["ema50"] = close.ewm(
+    ema50 = close.ewm(
         span=50,
         adjust=False
     ).mean()
 
-    # RSI
+    # RSI 14
     delta = close.diff()
 
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
+    gains = delta.clip(lower=0)
+    losses = -delta.clip(upper=0)
 
-    avg_gain = gain.ewm(
+    avg_gain = gains.ewm(
         alpha=1 / 14,
-        min_periods=14,
-        adjust=False
+        adjust=False,
+        min_periods=14
     ).mean()
 
-    avg_loss = loss.ewm(
+    avg_loss = losses.ewm(
         alpha=1 / 14,
-        min_periods=14,
-        adjust=False
+        adjust=False,
+        min_periods=14
     ).mean()
 
     rs = avg_gain / avg_loss.replace(0, float("nan"))
 
-    df["rsi"] = 100 - (100 / (1 + rs))
+    rsi = 100 - (100 / (1 + rs))
 
-    df.loc[
+    rsi = rsi.mask(
         (avg_loss == 0) & (avg_gain > 0),
-        "rsi"
-    ] = 100
+        100
+    )
 
-    df.loc[
+    rsi = rsi.mask(
         (avg_loss == 0) & (avg_gain == 0),
-        "rsi"
-    ] = 50
+        50
+    )
 
-    # ATR
+    # ATR 14
     previous_close = close.shift(1)
 
     tr = pd.concat(
@@ -72,10 +126,10 @@ def calculate_indicators(candles):
         axis=1
     ).max(axis=1)
 
-    df["atr"] = tr.ewm(
+    atr = tr.ewm(
         alpha=1 / 14,
-        min_periods=14,
-        adjust=False
+        adjust=False,
+        min_periods=14
     ).mean()
 
     # MACD
@@ -89,44 +143,41 @@ def calculate_indicators(candles):
         adjust=False
     ).mean()
 
-    df["macd"] = ema12 - ema26
+    macd = ema12 - ema26
 
-    df["macd_signal"] = df["macd"].ewm(
+    signal = macd.ewm(
         span=9,
         adjust=False
     ).mean()
 
-    # Volume
-    df["volume_avg"] = df["volume"].rolling(
-        20
+    # Average volume
+    volume_avg = volume.rolling(
+        window=20
     ).mean()
 
-    last = df.iloc[-1]
-    previous = df.iloc[-2]
-
-    result = {
-        "price": float(last["close"]),
-        "ema9": float(last["ema9"]),
-        "ema21": float(last["ema21"]),
-        "ema50": float(last["ema50"]),
-        "rsi": float(last["rsi"]),
-        "atr": float(last["atr"]),
-        "macd": float(last["macd"]),
-        "macd_signal": float(last["macd_signal"]),
-        "volume": float(last["volume"]),
-        "volume_avg": float(last["volume_avg"]),
-        "previous_close": float(previous["close"])
+    values = {
+        "price": close.iloc[-1],
+        "ema9": ema9.iloc[-1],
+        "ema21": ema21.iloc[-1],
+        "ema50": ema50.iloc[-1],
+        "rsi": rsi.iloc[-1],
+        "atr": atr.iloc[-1],
+        "macd": macd.iloc[-1],
+        "macd_signal": signal.iloc[-1],
+        "volume": volume.iloc[-1],
+        "volume_avg": volume_avg.iloc[-1],
+        "previous_close": close.iloc[-2]
     }
 
-    if any(
-        pd.isna(value)
-        for value in result.values()
-    ):
-        raise ValueError(
-            "Indicator calculation returned invalid values"
-        )
+    if not all(_is_valid(value) for value in values.values()):
+        return None
+
+    result = {
+        key: float(value)
+        for key, value in values.items()
+    }
 
     if result["atr"] <= 0:
-        raise ValueError("Invalid ATR value")
+        return None
 
     return result
