@@ -1,6 +1,8 @@
-import gradio as gr
 
-from datetime import datetime
+import asyncio
+import math
+
+import gradio as gr
 
 
 CSS = """
@@ -73,23 +75,19 @@ footer {
 
 
 def safe_float(value):
-
     try:
-
         result = float(value)
 
-        if result != result:
+        if not math.isfinite(result):
             return 0.0
 
         return result
 
     except (TypeError, ValueError, OverflowError):
-
         return 0.0
 
 
 def money(value):
-
     return f"{safe_float(value):,.2f} USDT"
 
 
@@ -99,7 +97,7 @@ def get_dashboard(controller):
     engine = controller.engine
     db = controller.db
 
-    summary = trader.get_summary()
+    summary = trader.get_summary() or {}
 
     balance = summary.get("balance", 0)
     equity = summary.get("equity", 0)
@@ -107,13 +105,13 @@ def get_dashboard(controller):
     unrealized = summary.get("unrealized_pnl", 0)
     reserved = summary.get("reserved", 0)
 
-    positions = summary.get("positions", [])
+    positions = summary.get("positions") or []
 
-    decisions = db.get_recent_decisions(15)
-    trades = db.get_recent_trades(15)
-    events = db.get_recent_events(20)
+    decisions = db.get_recent_decisions(15) or []
+    trades = db.get_recent_trades(15) or []
+    events = db.get_recent_events(20) or []
 
-    stats = engine.scan_stats
+    stats = getattr(engine, "scan_stats", {}) or {}
 
     status = (
         "RUNNING"
@@ -121,15 +119,19 @@ def get_dashboard(controller):
         else "STOPPED"
     )
 
-    regime = engine.market_regime
+    regime = getattr(
+        engine,
+        "market_regime",
+        "UNKNOWN"
+    )
 
     last_scan = (
-        engine.last_scan
+        getattr(engine, "last_scan", None)
         or "Not scanned yet"
     )
 
     error = (
-        engine.last_error
+        getattr(engine, "last_error", None)
         or "No system errors"
     )
 
@@ -139,26 +141,32 @@ def get_dashboard(controller):
 
         position_rows.append([
             position.get("symbol", ""),
+
             round(
                 safe_float(position.get("entry_price")),
                 8
             ),
+
             round(
                 safe_float(position.get("current_price")),
                 8
             ),
+
             round(
                 safe_float(position.get("quantity")),
                 6
             ),
+
             round(
                 safe_float(position.get("unrealized_pnl")),
                 4
             ),
+
             round(
                 safe_float(position.get("stop_loss")),
                 8
             ),
+
             round(
                 safe_float(position.get("take_profit")),
                 8
@@ -178,10 +186,14 @@ def get_dashboard(controller):
                 for item in reasons
             )
 
+        elif isinstance(reasons, dict):
+
+            reasons = str(reasons)
+
         decision_rows.append([
             decision.get("symbol", ""),
             decision.get("action", ""),
-            decision.get("score", 0),
+            safe_float(decision.get("score")),
             decision.get("ai_vote", ""),
             str(reasons)[:350],
             decision.get("timestamp", "")
@@ -193,18 +205,22 @@ def get_dashboard(controller):
 
         trade_rows.append([
             trade.get("symbol", ""),
+
             round(
                 safe_float(trade.get("entry_price")),
                 8
             ),
+
             round(
                 safe_float(trade.get("exit_price")),
                 8
             ),
+
             round(
                 safe_float(trade.get("net_pnl")),
                 4
             ),
+
             trade.get("reason", ""),
             trade.get("timestamp", "")
         ])
@@ -215,7 +231,7 @@ def get_dashboard(controller):
 
         event_rows.append([
             event.get("level", ""),
-            event.get("message", ""),
+            str(event.get("message", ""))[:500],
             event.get("timestamp", "")
         ])
 
@@ -225,16 +241,21 @@ def get_dashboard(controller):
         money(realized),
         money(unrealized),
         money(reserved),
+
         len(positions),
+
         f"{safe_float(summary.get('win_rate')):.2f}%",
+
         status,
         regime,
         last_scan,
         error,
+
         stats.get("scanned", 0),
         stats.get("approved", 0),
         stats.get("rejected", 0),
         stats.get("errors", 0),
+
         position_rows,
         decision_rows,
         trade_rows,
@@ -242,7 +263,7 @@ def get_dashboard(controller):
     )
 
 
-def force_scan(controller):
+async def force_scan(controller):
 
     engine = controller.engine
 
@@ -253,29 +274,21 @@ def force_scan(controller):
             *get_dashboard(controller)
         )
 
-    import asyncio
-
     try:
 
-        loop = asyncio.get_running_loop()
+        await engine.scan_once()
 
-        # Gradio callback executes inside the running server loop.
-        # Schedule the scan without blocking the event loop.
-        task = loop.create_task(
-            engine.scan_once()
+        message = "Market scan completed."
+
+    except asyncio.CancelledError:
+
+        raise
+
+    except Exception as exc:
+
+        message = (
+            f"Scan failed: {type(exc).__name__}: {str(exc)[:250]}"
         )
-
-        task.add_done_callback(
-            lambda completed: completed.exception()
-            if not completed.cancelled()
-            else None
-        )
-
-        message = "Market scan started."
-
-    except RuntimeError:
-
-        message = "Unable to start scan."
 
     return (
         message,
@@ -446,6 +459,14 @@ def build_dashboard(controller):
                 "Reasons",
                 "Timestamp"
             ],
+            datatype=[
+                "str",
+                "str",
+                "number",
+                "str",
+                "str",
+                "str"
+            ],
             interactive=False
         )
 
@@ -463,6 +484,14 @@ def build_dashboard(controller):
                 "Reason",
                 "Timestamp"
             ],
+            datatype=[
+                "str",
+                "number",
+                "number",
+                "number",
+                "str",
+                "str"
+            ],
             interactive=False
         )
 
@@ -476,6 +505,11 @@ def build_dashboard(controller):
                 "Level",
                 "Message",
                 "Timestamp"
+            ],
+            datatype=[
+                "str",
+                "str",
+                "str"
             ],
             interactive=False
         )
