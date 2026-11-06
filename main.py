@@ -45,23 +45,39 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# CONFIGURATION
+# CONFIGURATION VALIDATION
 # ============================================================
 
 if PAPER_MODE is not True:
+
     raise RuntimeError(
         "AI QUANT must run in PAPER_MODE=True"
     )
 
-if isinstance(PORT, bool) or not isinstance(PORT, int):
+
+if not isinstance(HOST, str) or not HOST.strip():
+
     raise ValueError(
-        "PORT must be an integer"
+        "HOST must be a non-empty string"
     )
 
-if not 1 <= PORT <= 65535:
-    raise ValueError(
-        "PORT must be between 1 and 65535"
-    )
+
+def get_server_port():
+
+    if (
+        isinstance(PORT, bool)
+        or not isinstance(PORT, int)
+        or not 1 <= PORT <= 65535
+    ):
+
+        raise ValueError(
+            "PORT must be an integer between 1 and 65535"
+        )
+
+    return PORT
+
+
+SERVER_PORT = get_server_port()
 
 
 # ============================================================
@@ -105,6 +121,44 @@ controller = SimpleNamespace(
 scanner_task = None
 
 shutdown_started = False
+
+application_started_once = False
+
+
+# ============================================================
+# SAFE HELPERS
+# ============================================================
+
+def safe_count(value):
+
+    if isinstance(value, bool):
+        return 0
+
+    try:
+
+        result = int(value)
+
+        return max(0, result)
+
+    except (TypeError, ValueError, OverflowError):
+
+        return 0
+
+
+def safe_status_text(value, default="UNKNOWN"):
+
+    if value is None:
+        return default
+
+    try:
+
+        result = str(value).strip()
+
+        return result[:200] if result else default
+
+    except Exception:
+
+        return default
 
 
 # ============================================================
@@ -159,13 +213,21 @@ async def shutdown_components():
         "Application shutdown started"
     )
 
-    # Prevent new background scans.
+    # Prevent new scans.
 
     engine.running = False
 
-    # Stop the scanner before closing its dependencies.
+    # Stop background scanner.
 
-    await stop_scanner()
+    try:
+
+        await stop_scanner()
+
+    except Exception:
+
+        logger.exception(
+            "Scanner shutdown failed"
+        )
 
     # Stop Telegram.
 
@@ -179,7 +241,7 @@ async def shutdown_components():
             "Telegram shutdown failed"
         )
 
-    # Close market, AI and news components.
+    # Close engine dependencies.
 
     try:
 
@@ -191,7 +253,7 @@ async def shutdown_components():
             "Engine shutdown failed"
         )
 
-    # Close the database last.
+    # Close database last.
 
     try:
 
@@ -217,6 +279,16 @@ async def lifespan(app: FastAPI):
 
     global scanner_task
     global shutdown_started
+    global application_started_once
+
+    if application_started_once:
+
+        raise RuntimeError(
+            "This AI QUANT application instance "
+            "cannot be restarted after shutdown."
+        )
+
+    application_started_once = True
 
     shutdown_started = False
 
@@ -228,7 +300,7 @@ async def lifespan(app: FastAPI):
 
     try:
 
-        # Start market data, AI and news.
+        # Start market, AI and news services.
 
         await engine.start()
 
@@ -246,7 +318,7 @@ async def lifespan(app: FastAPI):
             await telegram.start()
 
             logger.info(
-                "Telegram controller started"
+                "Telegram startup sequence completed"
             )
 
         except Exception:
@@ -300,7 +372,11 @@ async def health():
     )
 
     engine_running = bool(
-        getattr(engine, "running", False)
+        getattr(
+            engine,
+            "running",
+            False,
+        )
     )
 
     healthy = (
@@ -329,74 +405,100 @@ async def health():
 @api_app.get("/api/status")
 async def api_status():
 
-    summary = trader.get_summary() or {}
+    """
+    Public-safe status endpoint.
 
-    positions = summary.get(
-        "positions",
-        [],
-    ) or []
+    Financial account details and open position data
+    are intentionally not exposed without authentication.
+    """
 
-    return {
-        "application": APP_NAME,
-        "version": APP_VERSION,
-        "mode": "PAPER",
+    try:
 
-        "balance": summary.get(
-            "balance",
-            0,
-        ),
-
-        "equity": summary.get(
-            "equity",
-            0,
-        ),
-
-        "realized_pnl": summary.get(
-            "realized_pnl",
-            0,
-        ),
-
-        "unrealized_pnl": summary.get(
-            "unrealized_pnl",
-            0,
-        ),
-
-        "reserved": summary.get(
-            "reserved",
-            0,
-        ),
-
-        "open_positions": len(positions),
-
-        "win_rate": summary.get(
-            "win_rate",
-            0,
-        ),
-
-        "market_regime": getattr(
-            engine,
-            "market_regime",
-            "UNKNOWN",
-        ),
-
-        "last_scan": getattr(
-            engine,
-            "last_scan",
-            None,
-        ),
-
-        "last_error": getattr(
-            engine,
-            "last_error",
-            None,
-        ),
-
-        "scan_stats": getattr(
+        stats = getattr(
             engine,
             "scan_stats",
             {},
-        ),
-    }
+        )
+
+        if not isinstance(stats, dict):
+            stats = {}
+
+        task = scanner_task
+
+        scanner_active = (
+            task is not None
+            and not task.done()
+        )
+
+        return {
+            "application": APP_NAME,
+            "version": APP_VERSION,
+            "mode": "PAPER",
+
+            "engine_running": bool(
+                getattr(
+                    engine,
+                    "running",
+                    False,
+                )
+            ),
+
+            "scanner_active": scanner_active,
+
+            "market_regime": safe_status_text(
+                getattr(
+                    engine,
+                    "market_regime",
+                    "UNKNOWN",
+                )
+            ),
+
+            "last_scan": getattr(
+                engine,
+                "last_scan",
+                None,
+            ),
+
+            "last_error": safe_status_text(
+                getattr(
+                    engine,
+                    "last_error",
+                    None,
+                ),
+                default="",
+            ),
+
+            "scan_stats": {
+                "scanned": safe_count(
+                    stats.get("scanned")
+                ),
+                "approved": safe_count(
+                    stats.get("approved")
+                ),
+                "rejected": safe_count(
+                    stats.get("rejected")
+                ),
+                "errors": safe_count(
+                    stats.get("errors")
+                ),
+            },
+
+            "paper_trading_only": True,
+        }
+
+    except Exception:
+
+        logger.exception(
+            "API status endpoint failed"
+        )
+
+        return {
+            "application": APP_NAME,
+            "version": APP_VERSION,
+            "mode": "PAPER",
+            "status": "temporarily_unavailable",
+            "paper_trading_only": True,
+        }
 
 
 # ============================================================
@@ -415,25 +517,6 @@ app = gr.mount_gradio_app(
 
 
 # ============================================================
-# SERVER
-# ============================================================
-
-def get_server_port():
-
-    if (
-        isinstance(PORT, bool)
-        or not isinstance(PORT, int)
-        or not 1 <= PORT <= 65535
-    ):
-
-        raise ValueError(
-            "Invalid PORT configuration"
-        )
-
-    return PORT
-
-
-# ============================================================
 # MAIN
 # ============================================================
 
@@ -441,19 +524,17 @@ if __name__ == "__main__":
 
     try:
 
-        server_port = get_server_port()
-
         logger.info(
             "Starting %s on %s:%s",
             APP_NAME,
             HOST,
-            server_port,
+            SERVER_PORT,
         )
 
         uvicorn.run(
             app,
             host=HOST,
-            port=server_port,
+            port=SERVER_PORT,
             log_level="info",
             access_log=True,
         )
