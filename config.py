@@ -42,6 +42,18 @@ BINGX_BASE_URL = os.getenv(
     "https://open-api.bingx.com",
 ).strip().rstrip("/")
 
+# ============================================================
+# BINGX API CREDENTIALS
+# ============================================================
+
+BINGX_API_KEY = os.getenv(
+    "BINGX_API_KEY", ""
+).strip()
+
+BINGX_SECRET_KEY = os.getenv(
+    "BINGX_SECRET_KEY", ""
+).strip()
+
 TIMEFRAME = os.getenv("TIMEFRAME", "15m").strip()
 
 KLINE_LIMIT = 200
@@ -241,7 +253,7 @@ def validate_config():
     # --------------------------------------------------------
 
     if not _valid_https_url(BINGX_BASE_URL):
-    errors.append("BINGX_BASE_URL must be a valid HTTPS URL.")
+        errors.append("BINGX_BASE_URL must be a valid HTTPS URL.")
 
     if not isinstance(TIMEFRAME, str) or not TIMEFRAME:
         errors.append("TIMEFRAME must be a non-empty string.")
