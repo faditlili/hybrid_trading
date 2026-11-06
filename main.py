@@ -27,6 +27,10 @@ from config import (
 )
 
 
+# --------------------------------------------------
+# LOGGING
+# --------------------------------------------------
+
 logging.basicConfig(
     level=logging.INFO,
     format=(
@@ -75,6 +79,96 @@ controller = SimpleNamespace(
 
 
 scanner_task = None
+shutdown_started = False
+
+
+# --------------------------------------------------
+# SHUTDOWN HELPERS
+# --------------------------------------------------
+
+async def stop_scanner():
+
+    global scanner_task
+
+    task = scanner_task
+
+    if task is None:
+        return
+
+    scanner_task = None
+
+    if not task.done():
+
+        task.cancel()
+
+    try:
+
+        await task
+
+    except asyncio.CancelledError:
+
+        logger.info(
+            "Scanner task cancelled successfully"
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Scanner task terminated with an error"
+        )
+
+
+async def shutdown_components():
+
+    global shutdown_started
+
+    if shutdown_started:
+        return
+
+    shutdown_started = True
+
+    logger.info(
+        "Application shutdown started"
+    )
+
+    # Stop new scans before cancelling the background task.
+    engine.running = False
+
+    await stop_scanner()
+
+    try:
+
+        await telegram.close()
+
+    except Exception:
+
+        logger.exception(
+            "Telegram shutdown failed"
+        )
+
+    try:
+
+        await engine.close()
+
+    except Exception:
+
+        logger.exception(
+            "Engine shutdown failed"
+        )
+
+    try:
+
+        db.close()
+
+    except Exception:
+
+        logger.exception(
+            "Database shutdown failed"
+        )
+
+    logger.info(
+        "Application shutdown completed"
+    )
 
 
 # --------------------------------------------------
@@ -85,6 +179,9 @@ scanner_task = None
 async def lifespan(app: FastAPI):
 
     global scanner_task
+    global shutdown_started
+
+    shutdown_started = False
 
     logger.info(
         "Starting %s version %s",
@@ -94,13 +191,16 @@ async def lifespan(app: FastAPI):
 
     try:
 
+        # Start market data, AI and news components.
         await engine.start()
 
+        # Start the continuous market scanner.
         scanner_task = asyncio.create_task(
             engine.run_forever(),
             name="AI_QUANT_SCANNER"
         )
 
+        # Telegram is optional.
         try:
 
             await telegram.start()
@@ -119,117 +219,115 @@ async def lifespan(app: FastAPI):
 
     finally:
 
-        logger.info(
-            "Application shutdown started"
-        )
-
-        engine.running = False
-
-        if scanner_task:
-
-            scanner_task.cancel()
-
-            try:
-
-                await scanner_task
-
-            except asyncio.CancelledError:
-                pass
-
-            except Exception:
-
-                logger.exception(
-                    "Scanner shutdown failed"
-                )
-
-            scanner_task = None
-
-        try:
-
-            await telegram.close()
-
-        except Exception:
-
-            logger.exception(
-                "Telegram shutdown failed"
-            )
-
-        try:
-
-            await engine.close()
-
-        except Exception:
-
-            logger.exception(
-                "Engine shutdown failed"
-            )
-
-        try:
-
-            db.close()
-
-        except Exception:
-
-            logger.exception(
-                "Database shutdown failed"
-            )
-
-        logger.info(
-            "Application shutdown completed"
-        )
+        await shutdown_components()
 
 
 # --------------------------------------------------
 # FASTAPI
 # --------------------------------------------------
 
-app = FastAPI(
+api_app = FastAPI(
     title=APP_NAME,
     version=APP_VERSION,
     lifespan=lifespan
 )
 
 
-@app.get("/health")
+@api_app.get("/health")
 async def health():
 
+    scanner_active = (
+        scanner_task is not None
+        and not scanner_task.done()
+    )
+
+    engine_running = bool(
+        getattr(engine, "running", False)
+    )
+
+    healthy = (
+        engine_running
+        and scanner_active
+    )
+
     return {
-        "status": "ok",
+        "status": (
+            "ok"
+            if healthy
+            else "degraded"
+        ),
         "application": APP_NAME,
         "version": APP_VERSION,
-        "running": engine.running,
-        "paper_trading_only": True,
-        "market_regime": engine.market_regime,
-        "last_scan": engine.last_scan,
-        "last_error": engine.last_error,
-        "scanner_active": (
-            scanner_task is not None
-            and not scanner_task.done()
-        )
+        "running": engine_running,
+        "scanner_active": scanner_active,
+        "paper_trading_only": True
     }
 
 
-@app.get("/api/status")
+@api_app.get("/api/status")
 async def api_status():
 
-    summary = trader.get_summary()
+    summary = trader.get_summary() or {}
+
+    positions = summary.get(
+        "positions",
+        []
+    ) or []
 
     return {
         "application": APP_NAME,
         "version": APP_VERSION,
         "mode": "PAPER",
-        "balance": summary["balance"],
-        "equity": summary["equity"],
-        "realized_pnl": summary["realized_pnl"],
-        "unrealized_pnl": summary["unrealized_pnl"],
-        "reserved": summary["reserved"],
-        "open_positions": len(
-            summary["positions"]
+
+        "balance": summary.get(
+            "balance",
+            0
         ),
-        "win_rate": summary["win_rate"],
-        "market_regime": engine.market_regime,
-        "last_scan": engine.last_scan,
-        "scan_stats": engine.scan_stats
+
+        "equity": summary.get(
+            "equity",
+            0
+        ),
+
+        "realized_pnl": summary.get(
+            "realized_pnl",
+            0
+        ),
+
+        "unrealized_pnl": summary.get(
+            "unrealized_pnl",
+            0
+        ),
+
+        "reserved": summary.get(
+            "reserved",
+            0
+        ),
+
+        "open_positions": len(positions),
+
+        "win_rate": summary.get(
+            "win_rate",
+            0
+        ),
+
+        "market_regime": getattr(
+            engine,
+            "market_regime",
+            "UNKNOWN"
+        ),
+
+        "last_scan": getattr(
+            engine,
+            "last_scan",
+            None
+        ),
+
+        "scan_stats": getattr(
+            engine,
+            "scan_stats",
+            {}
+        )
     }
 
 
@@ -242,7 +340,7 @@ demo = create_dashboard(
 )
 
 app = gr.mount_gradio_app(
-    app,
+    api_app,
     demo,
     path="/"
 )
@@ -252,19 +350,56 @@ app = gr.mount_gradio_app(
 # SERVER
 # --------------------------------------------------
 
+def get_server_port():
+
+    raw_port = os.getenv(
+        "PORT",
+        str(DEFAULT_PORT)
+    )
+
+    try:
+
+        port = int(raw_port)
+
+    except (TypeError, ValueError):
+
+        raise ValueError(
+            "PORT must be a valid integer"
+        )
+
+    if not 1 <= port <= 65535:
+
+        raise ValueError(
+            "PORT must be between 1 and 65535"
+        )
+
+    return port
+
+
 if __name__ == "__main__":
 
-    port = int(
-        os.getenv(
-            "PORT",
-            DEFAULT_PORT
-        )
-    )
+    try:
 
-    uvicorn.run(
-        app,
-        host=HOST,
-        port=port,
-        log_level="info",
-        access_log=True
-    )
+        port = get_server_port()
+
+        uvicorn.run(
+            app,
+            host=HOST,
+            port=port,
+            log_level="info",
+            access_log=True
+        )
+
+    except KeyboardInterrupt:
+
+        logger.info(
+            "Application interrupted by user"
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Application startup failed"
+        )
+
+        raise
