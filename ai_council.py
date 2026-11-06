@@ -22,16 +22,46 @@ logger = logging.getLogger(__name__)
 
 class AICouncil:
 
+    MAX_CONTEXT_LENGTH = 8000
+    MAX_RESPONSE_BYTES = 1_000_000
+    MAX_MODELS = 30
+    MAX_CONCURRENCY = 20
+
+    VALID_VOTES = {
+        "BUY",
+        "SELL",
+        "HOLD",
+    }
+
+    # ========================================================
+    # INITIALIZATION
+    # ========================================================
+
     def __init__(self):
 
         self.session = None
         self.available = False
+
         self.model_status = []
 
-        self.max_context_length = 8000
+        self.max_context_length = (
+            self.MAX_CONTEXT_LENGTH
+        )
 
-        self.max_concurrent_requests = (
-            AI_MAX_CONCURRENT_REQUESTS
+        concurrency = AI_MAX_CONCURRENT_REQUESTS
+
+        if (
+            isinstance(concurrency, bool)
+            or not isinstance(concurrency, int)
+        ):
+            concurrency = 1
+
+        self.max_concurrent_requests = max(
+            1,
+            min(
+                concurrency,
+                self.MAX_CONCURRENCY,
+            )
         )
 
         self.request_semaphore = asyncio.Semaphore(
@@ -42,8 +72,11 @@ class AICouncil:
         self._closing = False
 
         self._active_requests = 0
+
         self._idle_event = asyncio.Event()
         self._idle_event.set()
+
+        self._close_task = None
 
     # ========================================================
     # VALIDATION
@@ -56,10 +89,31 @@ class AICouncil:
             return False
 
         try:
-            return math.isfinite(float(value))
 
-        except (TypeError, ValueError, OverflowError):
+            return math.isfinite(
+                float(value)
+            )
+
+        except (
+            TypeError,
+            ValueError,
+            OverflowError,
+        ):
+
             return False
+
+    @staticmethod
+    def normalize_vote(value):
+
+        if not isinstance(value, str):
+            return "INVALID"
+
+        vote = value.strip().upper()
+
+        if vote not in AICouncil.VALID_VOTES:
+            return "INVALID"
+
+        return vote
 
     @staticmethod
     def extract_vote(response):
@@ -68,7 +122,11 @@ class AICouncil:
             return "INVALID"
 
         text = response.strip().upper()
-        text = text.replace("\ufeff", "")
+
+        text = text.replace(
+            "\ufeff",
+            ""
+        )
 
         text = re.sub(
             r"^```(?:TEXT)?\s*|\s*```$",
@@ -93,7 +151,7 @@ class AICouncil:
         return {
             "model": model,
             "vote": "UNAVAILABLE",
-            "reason": reason,
+            "reason": str(reason)[:200],
         }
 
     @staticmethod
@@ -101,12 +159,14 @@ class AICouncil:
 
         return {
             "vote": "UNAVAILABLE",
-            "reason": reason,
+            "reason": str(reason)[:200],
+
             "votes": {
                 "BUY": 0,
                 "SELL": 0,
                 "HOLD": 0,
             },
+
             "available_models": 0,
             "details": [],
         }
@@ -127,8 +187,72 @@ class AICouncil:
 
         return max(
             0,
-            min(float(score), 100),
+            min(
+                float(score),
+                100,
+            )
         )
+
+    # ========================================================
+    # CONFIGURATION VALIDATION
+    # ========================================================
+
+    @staticmethod
+    def get_models():
+
+        if not isinstance(HF_MODELS, (list, tuple)):
+            return []
+
+        models = []
+        seen = set()
+
+        for model in HF_MODELS:
+
+            if not isinstance(model, str):
+                continue
+
+            model = model.strip()
+
+            if not model:
+                continue
+
+            if len(model) > 200:
+                continue
+
+            if model in seen:
+                continue
+
+            seen.add(model)
+            models.append(model)
+
+            if len(models) >= AICouncil.MAX_MODELS:
+                break
+
+        return models
+
+    @staticmethod
+    def validate_ai_configuration():
+
+        minimum_models = AI_MIN_VALID_MODELS
+
+        if (
+            isinstance(minimum_models, bool)
+            or not isinstance(minimum_models, int)
+            or minimum_models < 1
+        ):
+
+            return False, "Invalid minimum model configuration"
+
+        agreement = AI_MIN_AGREEMENT_RATIO
+
+        if (
+            not AICouncil.valid_number(agreement)
+            or not 0 < float(agreement) <= 1
+        ):
+
+            return False, "Invalid agreement ratio"
+
+        return True, "Configuration valid"
 
     # ========================================================
     # SESSION MANAGEMENT
@@ -139,16 +263,25 @@ class AICouncil:
         async with self._session_lock:
 
             if self._closing:
+
                 logger.warning(
                     "AI Council cannot restart after closing"
                 )
+
                 return
 
-            if self.session and not self.session.closed:
+            if (
+                self.session is not None
+                and not self.session.closed
+            ):
+
                 self.available = True
                 return
 
-            if not HF_TOKEN:
+            if (
+                not isinstance(HF_TOKEN, str)
+                or not HF_TOKEN.strip()
+            ):
 
                 logger.warning(
                     "Hugging Face token is not configured"
@@ -157,17 +290,46 @@ class AICouncil:
                 self.available = False
                 return
 
+            if (
+                not isinstance(HF_API_URL, str)
+                or not HF_API_URL.startswith(
+                    ("https://", "http://")
+                )
+            ):
+
+                logger.error(
+                    "Invalid Hugging Face API URL"
+                )
+
+                self.available = False
+                return
+
+            timeout_seconds = AI_REQUEST_TIMEOUT_SECONDS
+
+            if (
+                not self.valid_number(timeout_seconds)
+                or float(timeout_seconds) <= 0
+            ):
+
+                logger.error(
+                    "Invalid AI request timeout"
+                )
+
+                self.available = False
+                return
+
             try:
 
                 timeout = aiohttp.ClientTimeout(
-                    total=AI_REQUEST_TIMEOUT_SECONDS,
+                    total=float(timeout_seconds),
+                    connect=min(
+                        float(timeout_seconds),
+                        10.0,
+                    ),
                 )
 
                 connector = aiohttp.TCPConnector(
-                    limit=max(
-                        self.max_concurrent_requests,
-                        1,
-                    ),
+                    limit=self.max_concurrent_requests,
                     ttl_dns_cache=300,
                 )
 
@@ -175,7 +337,9 @@ class AICouncil:
                     timeout=timeout,
                     connector=connector,
                     headers={
-                        "Authorization": f"Bearer {HF_TOKEN}",
+                        "Authorization": (
+                            f"Bearer {HF_TOKEN}"
+                        ),
                         "Content-Type": "application/json",
                     },
                 )
@@ -195,28 +359,49 @@ class AICouncil:
                 self.session = None
                 self.available = False
 
+    async def _finish_close(self):
+
+        try:
+
+            await self._idle_event.wait()
+
+            async with self._session_lock:
+
+                session = self.session
+
+                self.session = None
+                self.available = False
+
+            if session and not session.closed:
+
+                await session.close()
+
+            logger.info(
+                "AI Council stopped"
+            )
+
+        except Exception:
+
+            logger.exception(
+                "AI Council shutdown failed"
+            )
+
+            raise
+
     async def close(self):
 
-        async with self._session_lock:
-
-            if self._closing:
-                return
+        if self._close_task is None:
 
             self._closing = True
             self.available = False
 
-        await self._idle_event.wait()
+            self._close_task = asyncio.create_task(
+                self._finish_close()
+            )
 
-        async with self._session_lock:
-
-            session = self.session
-            self.session = None
-
-            if session and not session.closed:
-                await session.close()
-
-        logger.info(
-            "AI Council stopped"
+        # Shield cleanup from caller cancellation.
+        await asyncio.shield(
+            self._close_task
         )
 
     async def _acquire_session(self):
@@ -230,9 +415,11 @@ class AICouncil:
                 self.session is None
                 or self.session.closed
             ):
+
                 return None
 
             self._active_requests += 1
+
             self._idle_event.clear()
 
             return self.session
@@ -247,13 +434,17 @@ class AICouncil:
             )
 
             if self._active_requests == 0:
+
                 self._idle_event.set()
 
     # ========================================================
-    # PROMPT
+    # PROMPT GENERATION
     # ========================================================
 
     def build_prompt(self, context):
+
+        if not isinstance(context, dict):
+            context = {}
 
         try:
 
@@ -264,13 +455,20 @@ class AICouncil:
                 default=str,
             )
 
-        except (TypeError, ValueError):
+        except (
+            TypeError,
+            ValueError,
+            OverflowError,
+        ):
 
             market_data = "{}"
 
-        market_data = market_data[
-            :self.max_context_length
-        ]
+        if len(market_data) > self.max_context_length:
+
+            market_data = (
+                market_data[:self.max_context_length]
+                + "\n[DATA TRUNCATED]"
+            )
 
         return f"""
 You are an analytical assistant
@@ -328,7 +526,11 @@ Market information:
 
         choices = data.get("choices")
 
-        if not isinstance(choices, list) or not choices:
+        if (
+            not isinstance(choices, list)
+            or not choices
+        ):
+
             return None
 
         choice = choices[0]
@@ -353,6 +555,7 @@ Market information:
             for item in content:
 
                 if isinstance(item, str):
+
                     parts.append(item)
 
                 elif isinstance(item, dict):
@@ -361,6 +564,9 @@ Market information:
 
                     if isinstance(value, str):
                         parts.append(value)
+
+            if not parts:
+                return None
 
             return " ".join(parts)
 
@@ -376,9 +582,11 @@ Market information:
 
         payload = {
             "model": model,
+
             "messages": [
                 {
                     "role": "system",
+
                     "content": (
                         "You are a cautious analysis assistant "
                         "for paper trading only. "
@@ -387,15 +595,19 @@ Market information:
                         "standalone word: BUY, SELL, or HOLD."
                     ),
                 },
+
                 {
                     "role": "user",
                     "content": prompt,
                 },
             ],
+
             "temperature": 0,
             "max_tokens": 12,
             "stream": False,
         }
+
+        session = None
 
         try:
 
@@ -430,20 +642,26 @@ Market information:
                                 f"HTTP error {response.status}",
                             )
 
-                        data = await response.json(
-                            content_type=None,
+                        raw_data = await response.content.read(
+                            self.MAX_RESPONSE_BYTES + 1
+                        )
+
+                        if len(raw_data) > self.MAX_RESPONSE_BYTES:
+
+                            return self.unavailable_result(
+                                model,
+                                "Response exceeds size limit",
+                            )
+
+                        data = json.loads(
+                            raw_data.decode("utf-8")
                         )
 
                 finally:
 
                     await self._release_session()
 
-            if not isinstance(data, dict):
-
-                return self.unavailable_result(
-                    model,
-                    "Invalid API response",
-                )
+                    session = None
 
             content = self.extract_content(data)
 
@@ -476,6 +694,7 @@ Market information:
             }
 
         except asyncio.CancelledError:
+
             raise
 
         except asyncio.TimeoutError:
@@ -503,6 +722,7 @@ Market information:
             TypeError,
             KeyError,
             IndexError,
+            UnicodeDecodeError,
         ) as error:
 
             logger.warning(
@@ -529,15 +749,26 @@ Market information:
             )
 
     # ========================================================
-    # COUNCIL ANALYSIS
+    # COUNCIL VOTING
     # ========================================================
 
     async def analyze(self, context):
 
+        if not isinstance(context, dict):
+
+            return self.empty_result(
+                "Invalid analysis context"
+            )
+
+        if self._closing:
+
+            return self.empty_result(
+                "AI Council is closing"
+            )
+
         if (
-            not self.session
+            self.session is None
             or self.session.closed
-            or self._closing
         ):
 
             self.available = False
@@ -546,23 +777,17 @@ Market information:
                 "AI session not initialized"
             )
 
-        if not isinstance(context, dict):
+        valid_config, config_reason = (
+            self.validate_ai_configuration()
+        )
+
+        if not valid_config:
 
             return self.empty_result(
-                "Invalid analysis context"
+                config_reason
             )
 
-        if not isinstance(HF_MODELS, (list, tuple)):
-
-            return self.empty_result(
-                "Invalid AI models configuration"
-            )
-
-        models = list(dict.fromkeys(
-            model.strip()
-            for model in HF_MODELS
-            if isinstance(model, str) and model.strip()
-        ))
+        models = self.get_models()
 
         if not models:
 
@@ -570,15 +795,48 @@ Market information:
                 "No AI models configured"
             )
 
+        minimum_models = AI_MIN_VALID_MODELS
+
+        if minimum_models > len(models):
+
+            return self.empty_result(
+                "Configured minimum exceeds available model count"
+            )
+
+        # ----------------------------------------------------
+        # RUN MODEL REQUESTS
+        # ----------------------------------------------------
+
         tasks = [
-            self.ask_model(model, context)
+
+            self.ask_model(
+                model,
+                context,
+            )
+
             for model in models
+
         ]
 
-        results = await asyncio.gather(
-            *tasks,
-            return_exceptions=True,
-        )
+        try:
+
+            results = await asyncio.gather(
+                *tasks,
+                return_exceptions=True,
+            )
+
+        except asyncio.CancelledError:
+
+            for task in tasks:
+
+                if asyncio.iscoroutine(task):
+                    task.close()
+
+            raise
+
+        # ----------------------------------------------------
+        # COLLECT VOTES
+        # ----------------------------------------------------
 
         votes = {
             "BUY": 0,
@@ -590,10 +848,17 @@ Market information:
 
         for index, result in enumerate(results):
 
-            if isinstance(result, asyncio.CancelledError):
+            if isinstance(
+                result,
+                asyncio.CancelledError,
+            ):
+
                 raise result
 
-            if isinstance(result, BaseException):
+            if isinstance(
+                result,
+                BaseException,
+            ):
 
                 details.append(
                     self.unavailable_result(
@@ -604,11 +869,25 @@ Market information:
 
                 continue
 
+            if not isinstance(result, dict):
+
+                details.append(
+                    self.unavailable_result(
+                        models[index],
+                        "Invalid task result",
+                    )
+                )
+
+                continue
+
             details.append(result)
 
-            vote = result.get("vote")
+            vote = self.normalize_vote(
+                result.get("vote")
+            )
 
             if vote in votes:
+
                 votes[vote] += 1
 
         self.model_status = details
@@ -617,67 +896,99 @@ Market information:
             votes.values()
         )
 
-        final_vote = "UNAVAILABLE"
-        reason = "Insufficient valid model votes"
-
-        minimum_models = AI_MIN_VALID_MODELS
-        agreement_ratio = AI_MIN_AGREEMENT_RATIO
-
-        if (
-            isinstance(minimum_models, bool)
-            or not isinstance(minimum_models, int)
-            or minimum_models < 1
-        ):
-            return self.empty_result(
-                "Invalid minimum AI model configuration"
-            )
-
-        if (
-            not self.valid_number(agreement_ratio)
-            or not 0 < float(agreement_ratio) <= 1
-        ):
-            return self.empty_result(
-                "Invalid AI agreement configuration"
-            )
+        # ----------------------------------------------------
+        # MINIMUM VALID RESPONSES
+        # ----------------------------------------------------
 
         if available_models < minimum_models:
 
-            reason = (
-                "Not enough valid model responses"
-            )
+            return {
+
+                "vote": "UNAVAILABLE",
+
+                "reason": (
+                    "Not enough valid model responses"
+                ),
+
+                "votes": votes,
+
+                "available_models": available_models,
+
+                "details": details,
+
+            }
+
+        # ----------------------------------------------------
+        # AGREEMENT CALCULATION
+        # ----------------------------------------------------
+
+        highest_count = max(
+            votes.values()
+        )
+
+        leaders = [
+
+            vote
+
+            for vote, count in votes.items()
+
+            if count == highest_count
+
+        ]
+
+        # A tied result must never select
+        # a winner based on dictionary order.
+
+        if len(leaders) != 1:
+
+            final_vote = "UNAVAILABLE"
+
+            reason = "AI models produced a tied result"
 
         else:
 
-            leading_vote = max(
-                votes,
-                key=votes.get,
+            leading_vote = leaders[0]
+
+            agreement = (
+                highest_count / available_models
             )
 
-            leading_count = votes[leading_vote]
+            if agreement < float(
+                AI_MIN_AGREEMENT_RATIO
+            ):
 
-            actual_agreement = (
-                leading_count / available_models
-            )
+                final_vote = "UNAVAILABLE"
 
-            if actual_agreement < float(agreement_ratio):
-
-                reason = "AI models disagree"
+                reason = (
+                    "AI models disagree: "
+                    f"{agreement:.0%} agreement"
+                )
 
             else:
 
                 final_vote = leading_vote
 
                 reason = (
-                    f"AI agreement reached: "
-                    f"{actual_agreement:.0%}"
+                    "AI agreement reached: "
+                    f"{agreement:.0%}"
                 )
 
+        # ----------------------------------------------------
+        # FINAL RESULT
+        # ----------------------------------------------------
+
         result = {
+
             "vote": final_vote,
+
             "reason": reason,
+
             "votes": votes,
+
             "available_models": available_models,
+
             "details": details,
+
         }
 
         logger.info(
