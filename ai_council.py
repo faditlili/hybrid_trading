@@ -1,21 +1,67 @@
 import aiohttp
 import asyncio
-from config import HF_TOKEN, HF_API_URL, HF_QWEN_MODEL, HF_DEEPSEEK_MODEL, HF_LLAMA_MODEL
+import re
+
+from config import (
+    HF_TOKEN,
+    HF_API_URL,
+    HF_QWEN_MODEL,
+    HF_DEEPSEEK_MODEL,
+    HF_LLAMA_MODEL
+)
 
 
 class AICouncil:
+
     def __init__(self):
         self.session = None
 
     async def start(self):
         timeout = aiohttp.ClientTimeout(total=35)
-        self.session = aiohttp.ClientSession(timeout=timeout)
+
+        self.session = aiohttp.ClientSession(
+            timeout=timeout
+        )
 
     async def close(self):
         if self.session and not self.session.closed:
             await self.session.close()
 
+    def extract_vote(self, output):
+
+        if not output:
+            return "UNAVAILABLE"
+
+        text = str(output).strip().upper()
+
+        text = re.sub(
+            r"<[^>]+>",
+            " ",
+            text
+        )
+
+        text = text.strip(" \n\r\t.:,!?*`\"'")
+
+        match = re.fullmatch(
+            r"(BUY|SELL|HOLD)",
+            text
+        )
+
+        if match:
+            return match.group(1)
+
+        match = re.search(
+            r"(?:FINAL ANSWER|DECISION|VOTE)\s*[:=]\s*(BUY|SELL|HOLD)\b",
+            text
+        )
+
+        if match:
+            return match.group(1)
+
+        return "UNAVAILABLE"
+
     async def ask_model(self, model, prompt):
+
         if not HF_TOKEN:
             return {
                 "available": False,
@@ -33,12 +79,14 @@ class AICouncil:
         payload = {
             "inputs": prompt,
             "parameters": {
-                "max_new_tokens": 180,
-                "return_full_text": False
+                "max_new_tokens": 80,
+                "return_full_text": False,
+                "temperature": 0.1
             }
         }
 
         try:
+
             async with self.session.post(
                 url,
                 headers=headers,
@@ -46,51 +94,68 @@ class AICouncil:
             ) as response:
 
                 if response.status != 200:
+
                     body = await response.text()
+
                     return {
                         "available": False,
                         "vote": "UNAVAILABLE",
-                        "error": f"HTTP {response.status}: {body[:250]}"
+                        "error": (
+                            f"HTTP {response.status}: "
+                            f"{body[:250]}"
+                        )
                     }
 
                 data = await response.json()
 
                 if isinstance(data, list) and data:
-                    output = data[0].get("generated_text", "")
+
+                    output = data[0].get(
+                        "generated_text",
+                        ""
+                    )
+
                 elif isinstance(data, dict):
-                    output = data.get("generated_text", "")
+
+                    output = data.get(
+                        "generated_text",
+                        ""
+                    )
+
                 else:
                     output = ""
 
-                output = str(output).upper()
-
-                if "BUY" in output:
-                    vote = "BUY"
-                elif "SELL" in output:
-                    vote = "SELL"
-                elif "HOLD" in output:
-                    vote = "HOLD"
-                else:
-                    vote = "UNAVAILABLE"
+                vote = self.extract_vote(output)
 
                 return {
                     "available": vote != "UNAVAILABLE",
                     "vote": vote,
-                    "output": output[:1000],
+                    "output": str(output)[:500],
                     "error": None
                 }
 
         except Exception as exc:
+
             return {
                 "available": False,
                 "vote": "UNAVAILABLE",
                 "error": str(exc)[:250]
             }
 
-    async def analyze(self, symbol, indicators, market_regime):
+    async def analyze(
+        self,
+        symbol,
+        indicators,
+        market_regime
+    ):
+
         prompt = f"""
-You are a cautious market analysis assistant.
-This is a paper-trading research simulation only.
+You are a cautious market research assistant.
+
+This is a paper-trading simulation.
+Do not predict guaranteed profits.
+
+Analyze these indicators:
 
 Symbol: {symbol}
 Market regime: {market_regime}
@@ -103,11 +168,14 @@ MACD: {indicators['macd']}
 MACD signal: {indicators['macd_signal']}
 ATR: {indicators['atr']}
 
-Return exactly one word:
-BUY, SELL, or HOLD.
+Choose exactly one label.
 
-Use BUY only when the indicators show a clear bullish setup.
-Otherwise return HOLD.
+BUY
+SELL
+HOLD
+
+Do not explain.
+Return only the label.
 """
 
         models = [
@@ -127,12 +195,15 @@ Otherwise return HOLD.
         votes = []
 
         for result in results:
+
             if isinstance(result, Exception):
+
                 votes.append({
                     "available": False,
                     "vote": "UNAVAILABLE",
                     "error": str(result)[:250]
                 })
+
             else:
                 votes.append(result)
 
@@ -142,17 +213,25 @@ Otherwise return HOLD.
             if item["available"]
         ]
 
-        if not valid_votes:
-            final_vote = "UNAVAILABLE"
-        elif valid_votes.count("BUY") >= 2:
+        buy_count = valid_votes.count("BUY")
+        sell_count = valid_votes.count("SELL")
+
+        if buy_count >= 2:
             final_vote = "BUY"
-        elif valid_votes.count("SELL") >= 2:
+
+        elif sell_count >= 2:
             final_vote = "SELL"
-        else:
+
+        elif len(valid_votes) >= 2:
             final_vote = "HOLD"
+
+        else:
+            final_vote = "UNAVAILABLE"
 
         return {
             "vote": final_vote,
             "models": votes,
-            "valid_models": len(valid_votes)
+            "valid_models": len(valid_votes),
+            "buy_votes": buy_count,
+            "sell_votes": sell_count
         }
