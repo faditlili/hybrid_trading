@@ -1,4 +1,3 @@
-
 import asyncio
 import json
 import logging
@@ -19,7 +18,6 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 def _config_value(names, default):
-    """Read configuration while supporting existing config names."""
     for name in names:
         if hasattr(config, name):
             value = getattr(config, name)
@@ -193,10 +191,6 @@ def validate_ai_configuration():
 # ============================================================
 
 def _sanitize_context(value, depth=0):
-    """
-    Convert context into JSON-safe values.
-    Avoid sending large DataFrames or arbitrary Python objects.
-    """
 
     if depth > 8:
         return "[maximum depth reached]"
@@ -211,10 +205,10 @@ def _sanitize_context(value, depth=0):
         result = {}
 
         for key, item in list(value.items())[:100]:
+
             if not isinstance(key, str):
                 continue
 
-            # Technical analysis may contain a full DataFrame.
             if key.lower() in {"data", "candles", "klines"}:
                 continue
 
@@ -231,7 +225,6 @@ def _sanitize_context(value, depth=0):
             for item in value[:100]
         ]
 
-    # Handle pandas and other tabular objects without importing pandas.
     if hasattr(value, "shape") and hasattr(value, "columns"):
         return {
             "type": "tabular_data",
@@ -322,6 +315,7 @@ class AICouncil:
             if not validate_ai_configuration():
 
                 self.available = False
+                self.model_status = []
 
                 logger.warning(
                     "AI council configuration is incomplete or invalid."
@@ -411,7 +405,6 @@ class AICouncil:
             await asyncio.shield(task)
 
         except asyncio.CancelledError:
-
             raise
 
         finally:
@@ -553,7 +546,6 @@ Market context:
 
         content = content.strip()
 
-        # First, try strict JSON parsing.
         try:
 
             parsed = json.loads(content)
@@ -574,7 +566,6 @@ Market context:
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
 
-        # Permit a JSON object surrounded by markdown fences.
         cleaned = re.sub(
             r"^```(?:json)?\s*|\s*```$",
             "",
@@ -728,13 +719,11 @@ Market context:
                     return result
 
             except asyncio.CancelledError:
-
                 raise
 
             except asyncio.TimeoutError:
 
                 result["reason"] = "Model request timed out."
-
                 return result
 
             except aiohttp.ClientError:
@@ -773,6 +762,8 @@ Market context:
 
     async def analyze(self, context):
 
+        self.model_status = []
+
         if not self.available:
 
             return self.unavailable_result(
@@ -801,7 +792,6 @@ Market context:
             )
 
         except asyncio.CancelledError:
-
             raise
 
         except Exception:
@@ -815,7 +805,6 @@ Market context:
             )
 
         valid_results = []
-
         details = []
 
         for model, item in zip(models, results):
@@ -859,6 +848,9 @@ Market context:
             if available:
                 valid_results.append(detail)
 
+        # Always publish the latest model states.
+        self.model_status = details
+
         votes = {
             item["model"]: item["vote"]
             for item in valid_results
@@ -887,6 +879,22 @@ Market context:
         winner, winner_count = counts.most_common(1)[0]
 
         agreement = winner_count / available_count
+
+        # Reject tied results explicitly.
+        if list(counts.values()).count(winner_count) > 1:
+
+            return {
+                "available": False,
+                "vote": "UNAVAILABLE",
+                "reason": (
+                    "AI council vote is tied. "
+                    "No decision will be issued."
+                ),
+                "votes": votes,
+                "available_models": available_count,
+                "agreement": round(agreement, 4),
+                "details": details,
+            }
 
         if agreement < required_agreement:
 
@@ -921,8 +929,6 @@ Market context:
             f"Agreement: {agreement:.1%}. "
             + " ".join(winning_reasons[:2])
         )
-
-        self.model_status = details
 
         logger.info(
             "AI council result: vote=%s agreement=%.2f models=%s",
