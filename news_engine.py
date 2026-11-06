@@ -161,11 +161,13 @@ class NewsEngine:
 
         return self.latest_news
 
-    async def get_news(self, limit=20):
+        async def get_news(self, limit=20):
 
         if not isinstance(limit, int):
             limit = 20
 
         limit = max(1, min(limit, 30))
 
-        return await self.fetch_all()[:limit]
+        news = await self.fetch_all()
+
+        return news[:limit]
