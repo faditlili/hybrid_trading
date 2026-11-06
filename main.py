@@ -1,15 +1,24 @@
+
 import asyncio
-import inspect
 import logging
 import os
 
 from contextlib import asynccontextmanager
-from types import SimpleNamespace
+from datetime import datetime, timezone
 
 import gradio as gr
 import uvicorn
 
 from fastapi import FastAPI
+
+from config import (
+    APP_NAME,
+    APP_VERSION,
+    HOST,
+    PORT,
+    PAPER_MODE,
+    LOG_LEVEL,
+)
 
 from database import Database
 from market_data import MarketData
@@ -20,13 +29,7 @@ from engine import TradingEngine
 from dashboard import create_dashboard
 from telegram_bot import TelegramController
 
-from config import (
-    HOST,
-    PORT,
-    APP_NAME,
-    APP_VERSION,
-    PAPER_MODE,
-)
+from types import SimpleNamespace
 
 
 # ============================================================
@@ -34,12 +37,14 @@ from config import (
 # ============================================================
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(
+        logging,
+        str(LOG_LEVEL).upper(),
+        logging.INFO,
+    ),
     format=(
-        "%(asctime)s | "
-        "%(levelname)s | "
-        "%(name)s | "
-        "%(message)s"
+        "%(asctime)s | %(levelname)s | "
+        "%(name)s | %(message)s"
     ),
 )
 
@@ -47,120 +52,67 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# CONFIGURATION VALIDATION
+# APPLICATION VALIDATION
 # ============================================================
 
 if PAPER_MODE is not True:
     raise RuntimeError(
-        "AI QUANT must run in PAPER_MODE=True"
+        "AI QUANT supports PAPER_MODE=True only."
     )
-
 
 if not isinstance(HOST, str) or not HOST.strip():
-    raise ValueError(
-        "HOST must be a non-empty string"
-    )
+    raise ValueError("Invalid HOST configuration.")
 
-SERVER_HOST = HOST.strip()
+if isinstance(PORT, bool) or not isinstance(PORT, int):
+    raise ValueError("PORT must be an integer.")
 
-
-def get_server_port():
-
-    if (
-        isinstance(PORT, bool)
-        or not isinstance(PORT, int)
-        or not 1 <= PORT <= 65535
-    ):
-        raise ValueError(
-            "PORT must be between 1 and 65535"
-        )
-
-    return PORT
-
-
-SERVER_PORT = get_server_port()
+if not 1 <= PORT <= 65535:
+    raise ValueError("Invalid PORT range.")
 
 
 # ============================================================
-# DASHBOARD AUTHENTICATION
-# ============================================================
-
-def get_dashboard_auth():
-
-    username = os.getenv(
-        "DASHBOARD_USERNAME",
-        ""
-    ).strip()
-
-    password = os.getenv(
-        "DASHBOARD_PASSWORD",
-        ""
-    )
-
-    if not username or not password:
-
-        raise RuntimeError(
-            "Dashboard authentication is required. "
-            "Set DASHBOARD_USERNAME and DASHBOARD_PASSWORD."
-        )
-
-    if len(username) > 100:
-
-        raise ValueError(
-            "DASHBOARD_USERNAME is too long"
-        )
-
-    if len(password) < 16:
-
-        raise ValueError(
-            "DASHBOARD_PASSWORD must contain "
-            "at least 16 characters"
-        )
-
-    if len(password) > 256:
-
-        raise ValueError(
-            "DASHBOARD_PASSWORD is too long"
-        )
-
-    return username, password
-
-
-DASHBOARD_AUTH = get_dashboard_auth()
-
-
-# ============================================================
-# CORE COMPONENTS
+# SERVICE INSTANCES
 # ============================================================
 
 db = Database()
-
 market = MarketData()
-
 ai = AICouncil()
-
 news = NewsEngine()
 
 trader = PaperTrader(db)
 
 engine = TradingEngine(
-    market,
-    ai,
-    news,
-    trader,
-    db,
-)
-
-telegram = TelegramController(
-    engine,
-    trader,
-)
-
-controller = SimpleNamespace(
-    engine=engine,
+    market=market,
+    ai=ai,
+    news=news,
     trader=trader,
     db=db,
 )
+
+telegram = TelegramController(
+    engine=engine,
+    trader=trader,
+)
+
+controller = SimpleNamespace(
+    db=db,
+    market=market,
+    ai=ai,
+    news=news,
+    trader=trader,
+    engine=engine,
+    telegram=telegram,
+)
+
+
+# ============================================================
+# DASHBOARD
+# ============================================================
+
+demo = create_dashboard(controller)
+
+if demo is None:
+    raise RuntimeError("Dashboard creation failed.")
 
 
 # ============================================================
@@ -169,210 +121,158 @@ controller = SimpleNamespace(
 
 scanner_task = None
 
-shutdown_started = False
+application_started = False
 
-startup_completed = False
+shutdown_lock = asyncio.Lock()
 
-application_state = "CREATED"
+application_state = {
+    "status": "starting",
+    "scanner_running": False,
+    "telegram_running": False,
+    "paper_mode": True,
+    "started_at": None,
+    "last_error": None,
+}
 
 
 # ============================================================
-# SAFE HELPERS
+# TELEGRAM
 # ============================================================
 
-def safe_count(value):
-
-    if isinstance(value, bool):
-        return 0
+async def start_telegram():
 
     try:
 
-        result = int(value)
+        result = await telegram.start()
 
-        return max(0, result)
+        if result is False:
 
-    except (TypeError, ValueError, OverflowError):
+            application_state["telegram_running"] = False
 
-        return 0
+            logger.warning("Telegram bot did not start.")
 
+            return False
 
-def safe_status_text(
-    value,
-    default="UNKNOWN",
-    limit=200,
-):
+        application_state["telegram_running"] = True
 
-    if value is None:
-        return default
+        logger.info("Telegram bot started.")
 
-    try:
+        return True
 
-        result = str(value).strip()
-
-        return result[:limit] if result else default
+    except asyncio.CancelledError:
+        raise
 
     except Exception:
 
-        return default
+        application_state["telegram_running"] = False
+
+        logger.exception("Telegram startup failed.")
+
+        return False
 
 
-def scanner_is_active():
+async def stop_telegram():
 
-    task = scanner_task
+    try:
 
-    return (
-        task is not None
-        and not task.done()
-        and not task.cancelled()
-    )
+        await telegram.close()
+
+    except asyncio.CancelledError:
+        raise
+
+    except Exception:
+
+        logger.exception("Telegram shutdown failed.")
+
+    finally:
+
+        application_state["telegram_running"] = False
 
 
 # ============================================================
-# SCANNER SHUTDOWN
+# SHUTDOWN
 # ============================================================
 
-async def stop_scanner():
+async def shutdown_application():
 
     global scanner_task
+    global application_started
 
-    task = scanner_task
+    async with shutdown_lock:
 
-    if task is None:
-        return
+        if not application_started:
+            return
 
-    scanner_task = None
+        logger.info("AI QUANT shutdown started.")
 
-    if not task.done():
-        task.cancel()
+        application_state["status"] = "stopping"
 
-    try:
+        await stop_telegram()
 
-        await task
+        try:
 
-    except asyncio.CancelledError:
+            await engine.close()
 
-        logger.info(
-            "Scanner task stopped"
-        )
+        except asyncio.CancelledError:
+            raise
 
-    except Exception:
+        except Exception:
 
-        logger.exception(
-            "Scanner task failed during shutdown"
-        )
+            logger.exception("Trading engine shutdown failed.")
 
+        task = scanner_task
 
-# ============================================================
-# SAFE COMPONENT SHUTDOWN
-# ============================================================
+        if task is not None:
 
-async def shutdown_component(
-    name,
-    close_function,
-):
+            try:
 
-    try:
+                await asyncio.wait_for(
+                    asyncio.shield(task),
+                    timeout=15,
+                )
 
-        result = close_function()
+            except asyncio.TimeoutError:
 
-        if inspect.isawaitable(result):
-            await result
+                logger.warning(
+                    "Scanner did not stop within 15 seconds."
+                )
 
-        logger.info(
-            "%s shutdown completed",
-            name,
-        )
+                task.cancel()
 
-    except asyncio.CancelledError:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
-        logger.warning(
-            "%s shutdown was cancelled",
-            name,
-        )
+            except asyncio.CancelledError:
+                raise
 
-    except Exception:
+            except Exception:
 
-        logger.exception(
-            "%s shutdown failed",
-            name,
-        )
+                logger.exception(
+                    "Scanner task shutdown failed."
+                )
 
+        scanner_task = None
 
-# ============================================================
-# APPLICATION SHUTDOWN
-# ============================================================
+        application_state["scanner_running"] = False
 
-async def shutdown_components():
+        try:
 
-    global shutdown_started
-    global application_state
+            await db.close()
 
-    if shutdown_started:
-        return
+        except asyncio.CancelledError:
+            raise
 
-    shutdown_started = True
+        except Exception:
 
-    application_state = "STOPPING"
+            logger.exception("Database shutdown failed.")
 
-    logger.info(
-        "Application shutdown started"
-    )
+        application_state["status"] = "stopped"
 
-    # --------------------------------------------------------
-    # STOP NEW SCANS
-    # --------------------------------------------------------
+        application_started = False
 
-    try:
-
-        engine.running = False
-
-    except Exception:
-
-        logger.exception(
-            "Could not stop engine"
-        )
-
-    # --------------------------------------------------------
-    # STOP SCANNER
-    # --------------------------------------------------------
-
-    await shutdown_component(
-        "Scanner",
-        stop_scanner,
-    )
-
-    # --------------------------------------------------------
-    # STOP TELEGRAM
-    # --------------------------------------------------------
-
-    await shutdown_component(
-        "Telegram",
-        telegram.close,
-    )
-
-    # --------------------------------------------------------
-    # CLOSE ENGINE AND DEPENDENCIES
-    # --------------------------------------------------------
-
-    await shutdown_component(
-        "Trading engine",
-        engine.close,
-    )
-
-    # --------------------------------------------------------
-    # CLOSE DATABASE LAST
-    # --------------------------------------------------------
-
-    await shutdown_component(
-        "Database",
-        db.close,
-    )
-
-    application_state = "STOPPED"
-
-    logger.info(
-        "Application shutdown completed"
-    )
+        logger.info("AI QUANT shutdown completed.")
 
 
 # ============================================================
@@ -380,338 +280,209 @@ async def shutdown_components():
 # ============================================================
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app):
 
     global scanner_task
-    global shutdown_started
-    global startup_completed
-    global application_state
+    global application_started
 
-    shutdown_started = False
-    startup_completed = False
-    scanner_task = None
-
-    application_state = "STARTING"
-
-    logger.info(
-        "Starting %s version %s",
-        APP_NAME,
-        APP_VERSION,
-    )
+    application_state["status"] = "starting"
+    application_state["last_error"] = None
 
     try:
 
-        # ----------------------------------------------------
-        # START ENGINE AND DEPENDENCIES
-        # ----------------------------------------------------
+        if application_started:
+            raise RuntimeError("Application is already running.")
 
-        await engine.start()
+        if PAPER_MODE is not True:
+            raise RuntimeError("Paper mode is mandatory.")
 
-        if not getattr(engine, "running", False):
+        started = await engine.start()
 
-            raise RuntimeError(
-                "Trading engine did not start"
-            )
-
-        # ----------------------------------------------------
-        # START BACKGROUND SCANNER
-        # ----------------------------------------------------
+        if started is not True:
+            raise RuntimeError("Trading engine could not start.")
 
         scanner_task = asyncio.create_task(
             engine.run_forever(),
-            name="AI_QUANT_SCANNER",
+            name="ai-quant-scanner",
         )
 
-        # ----------------------------------------------------
-        # START TELEGRAM (OPTIONAL)
-        # ----------------------------------------------------
+        application_state["scanner_running"] = True
 
-        try:
+        await start_telegram()
 
-            await telegram.start()
+        application_started = True
 
-            logger.info(
-                "Telegram startup completed"
-            )
+        application_state["status"] = "running"
 
-        except asyncio.CancelledError:
-
-            raise
-
-        except Exception:
-
-            logger.exception(
-                "Telegram startup failed; "
-                "continuing without Telegram"
-            )
-
-        # ----------------------------------------------------
-        # STARTUP COMPLETE
-        # ----------------------------------------------------
-
-        startup_completed = True
-
-        application_state = "RUNNING"
+        application_state["started_at"] = (
+            datetime.now(timezone.utc).isoformat()
+        )
 
         logger.info(
-            "Application startup completed"
+            "%s %s started in paper mode.",
+            APP_NAME,
+            APP_VERSION,
         )
 
         yield
 
     except asyncio.CancelledError:
-
-        application_state = "FAILED"
-
-        logger.warning(
-            "Application startup or lifespan cancelled"
-        )
-
         raise
 
-    except Exception:
+    except Exception as exc:
 
-        application_state = "FAILED"
+        application_state["status"] = "error"
+
+        application_state["last_error"] = type(exc).__name__
 
         logger.exception(
-            "Application lifecycle failed"
+            "Application startup or runtime failed."
         )
 
         raise
 
     finally:
 
-        await shutdown_components()
+        if application_started:
+
+            await shutdown_application()
+
+        else:
+
+            try:
+                await engine.close()
+            except Exception:
+                logger.exception("Startup rollback failed.")
+
+            try:
+                await db.close()
+            except Exception:
+                logger.exception("Database rollback failed.")
 
 
 # ============================================================
-# FASTAPI APPLICATION
+# FASTAPI
 # ============================================================
 
 api_app = FastAPI(
     title=APP_NAME,
     version=APP_VERSION,
+    description=(
+        "AI-assisted cryptocurrency market analysis "
+        "and paper trading system."
+    ),
     lifespan=lifespan,
 )
 
 
 # ============================================================
-# HEALTH ENDPOINT
+# HEALTH
 # ============================================================
 
 @api_app.get("/health")
 async def health():
 
-    engine_running = bool(
-        getattr(
-            engine,
-            "running",
-            False,
-        )
-    )
-
-    scanner_active = scanner_is_active()
-
-    healthy = (
-        application_state == "RUNNING"
-        and startup_completed
-        and engine_running
-        and scanner_active
+    task_running = (
+        scanner_task is not None
+        and not scanner_task.done()
     )
 
     return {
-
-        "status": (
-            "ok"
-            if healthy
-            else "degraded"
-        ),
-
         "application": APP_NAME,
-
         "version": APP_VERSION,
-
-        "application_state": application_state,
-
-        "running": engine_running,
-
-        "scanner_active": scanner_active,
-
-        "paper_trading_only": True,
-
+        "status": application_state["status"],
+        "paper_mode": True,
+        "scanner_running": task_running,
+        "engine_running": engine.running,
+        "telegram_running": (
+            application_state["telegram_running"]
+        ),
     }
 
 
 # ============================================================
-# STATUS ENDPOINT
+# API STATUS
 # ============================================================
 
 @api_app.get("/api/status")
 async def api_status():
 
-    """
-    Public-safe status endpoint.
+    def read_status(component):
 
-    Account balances, equity and open positions
-    are intentionally not exposed.
-    """
-
-    try:
-
-        stats = getattr(
-            engine,
-            "scan_stats",
-            {},
-        )
-
-        if not isinstance(stats, dict):
-            stats = {}
-
-        engine_running = bool(
-            getattr(
-                engine,
-                "running",
-                False,
-            )
-        )
-
-        scanner_active = scanner_is_active()
-
-        last_scan = safe_status_text(
-            getattr(
-                engine,
-                "last_scan",
-                None,
-            ),
-            default="",
-        )
-
-        last_error = getattr(
-            engine,
-            "last_error",
+        method = getattr(
+            component,
+            "get_status",
             None,
         )
 
-        return {
+        if not callable(method):
+            return {}
 
-            "application": APP_NAME,
+        try:
 
-            "version": APP_VERSION,
+            result = method()
 
-            "mode": "PAPER",
+            return result if isinstance(result, dict) else {}
 
-            "application_state": application_state,
+        except Exception:
 
-            "engine_running": engine_running,
+            logger.exception(
+                "Could not read component status."
+            )
 
-            "scanner_active": scanner_active,
+            return {}
 
-            "market_regime": safe_status_text(
-                getattr(
-                    engine,
-                    "market_regime",
-                    "UNKNOWN",
-                )
-            ),
-
-            "last_scan": last_scan,
-
-            "has_error": bool(last_error),
-
-            "scan_stats": {
-
-                "scanned": safe_count(
-                    stats.get("scanned")
-                ),
-
-                "approved": safe_count(
-                    stats.get("approved")
-                ),
-
-                "rejected": safe_count(
-                    stats.get("rejected")
-                ),
-
-                "errors": safe_count(
-                    stats.get("errors")
-                ),
-
-            },
-
-            "paper_trading_only": True,
-
-        }
-
-    except Exception:
-
-        logger.exception(
-            "API status endpoint failed"
-        )
-
-        return {
-
-            "application": APP_NAME,
-
-            "version": APP_VERSION,
-
-            "mode": "PAPER",
-
-            "status": "temporarily_unavailable",
-
-            "paper_trading_only": True,
-
-        }
+    return {
+        "application": APP_NAME,
+        "version": APP_VERSION,
+        "status": application_state["status"],
+        "paper_mode": True,
+        "engine": read_status(engine),
+        "market": read_status(market),
+        "ai": read_status(ai),
+        "news": read_status(news),
+        "telegram_running": (
+            application_state["telegram_running"]
+        ),
+    }
 
 
 # ============================================================
 # GRADIO DASHBOARD
 # ============================================================
 
-demo = create_dashboard(
-    controller
-)
-
-app = gr.mount_gradio_app(
+# No username or password required.
+api_app = gr.mount_gradio_app(
     api_app,
     demo,
     path="/",
-    auth=DASHBOARD_AUTH,
 )
 
 
 # ============================================================
-# MAIN
+# SERVER
 # ============================================================
 
+def run():
+
+    if PAPER_MODE is not True:
+        raise RuntimeError("Real trading is disabled.")
+
+    logger.info(
+        "Starting %s version %s.",
+        APP_NAME,
+        APP_VERSION,
+    )
+
+    uvicorn.run(
+        api_app,
+        host=HOST,
+        port=PORT,
+        log_level=str(LOG_LEVEL).lower(),
+        access_log=False,
+        timeout_keep_alive=10,
+    )
+
+
 if __name__ == "__main__":
-
-    try:
-
-        logger.info(
-            "Starting %s on %s:%s",
-            APP_NAME,
-            SERVER_HOST,
-            SERVER_PORT,
-        )
-
-        uvicorn.run(
-            app,
-            host=SERVER_HOST,
-            port=SERVER_PORT,
-            log_level="info",
-            access_log=True,
-        )
-
-    except KeyboardInterrupt:
-
-        logger.info(
-            "Application interrupted by user"
-        )
-
-    except Exception:
-
-        logger.exception(
-            "Application startup failed"
-        )
-
-        raise
+    run()
