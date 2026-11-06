@@ -294,6 +294,15 @@ def validate_config():
                     errors.append(
                         f"Invalid trading symbol: {symbol!r}"
                     )
+    # BINGX SYMBOL MAP
+    if not isinstance(BINGX_SYMBOL_MAP, dict):
+        errors.append("BINGX_SYMBOL_MAP must be a dictionary.")
+    else:
+        for symbol in SYMBOLS:
+            if symbol not in BINGX_SYMBOL_MAP:
+                errors.append(
+                    f"Missing BingX mapping for {symbol}."
+                )
 
     # ENGINE
     integer_settings = {
