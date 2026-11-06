@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import math
+import re
 
 from datetime import datetime, timezone
 
@@ -32,7 +33,6 @@ class MarketData:
     def __init__(self):
 
         self.session = None
-
         self.base_url = BINANCE_BASE_URL.rstrip("/")
 
         self.timeout = aiohttp.ClientTimeout(
@@ -61,7 +61,19 @@ class MarketData:
                 "HTTP_MAX_CONNECTIONS must be positive"
             )
 
+        if (
+            not self.valid_number(MIN_QUOTE_VOLUME)
+            or float(MIN_QUOTE_VOLUME) < 0
+        ):
+            raise ValueError(
+                "MIN_QUOTE_VOLUME must be non-negative"
+            )
+
         self._session_lock = asyncio.Lock()
+        self._active_requests = 0
+        self._idle_event = asyncio.Event()
+        self._idle_event.set()
+
         self._closing = False
 
         self.last_success = {}
@@ -93,6 +105,50 @@ class MarketData:
         return datetime.now(
             timezone.utc
         ).isoformat()
+
+    @staticmethod
+    def _valid_symbol(symbol):
+
+        return (
+            isinstance(symbol, str)
+            and bool(symbol)
+            and symbol == symbol.upper()
+            and symbol.isalnum()
+        )
+
+    @staticmethod
+    def _interval_milliseconds(interval):
+
+        if not isinstance(interval, str):
+            raise MarketDataError(
+                "Invalid kline interval"
+            )
+
+        match = re.fullmatch(
+            r"([1-9][0-9]*)(s|m|h|d|w|M)",
+            interval,
+        )
+
+        if not match:
+            raise MarketDataError(
+                f"Unsupported kline interval: {interval}"
+            )
+
+        amount = int(match.group(1))
+        unit = match.group(2)
+
+        multipliers = {
+            "s": 1000,
+            "m": 60 * 1000,
+            "h": 60 * 60 * 1000,
+            "d": 24 * 60 * 60 * 1000,
+            "w": 7 * 24 * 60 * 60 * 1000,
+        }
+
+        if unit == "M":
+            return None
+
+        return amount * multipliers[unit]
 
     def record_error(self, symbol, error):
 
@@ -135,7 +191,16 @@ class MarketData:
 
         async with self._session_lock:
 
+            if self._closing:
+                return
+
             self._closing = True
+
+        # Wait for active requests to finish before closing
+        # the shared HTTP session.
+        await self._idle_event.wait()
+
+        async with self._session_lock:
 
             session = self.session
             self.session = None
@@ -143,19 +208,54 @@ class MarketData:
             if session and not session.closed:
                 await session.close()
 
-            logger.info(
-                "Market data service closed"
+        logger.info(
+            "Market data service closed"
+        )
+
+    async def _acquire_session(self):
+
+        async with self._session_lock:
+
+            if self._closing:
+                raise MarketDataError(
+                    "Market data service is closed"
+                )
+
+            if self.session is None or self.session.closed:
+
+                connector = aiohttp.TCPConnector(
+                    limit=self.connector_limit,
+                    enable_cleanup_closed=True,
+                )
+
+                self.session = aiohttp.ClientSession(
+                    timeout=self.timeout,
+                    connector=connector,
+                    headers={
+                        "User-Agent": "AI-QUANT-PaperTrading/3.1"
+                    },
+                )
+
+                logger.info(
+                    "Market data HTTP session created"
+                )
+
+            self._active_requests += 1
+            self._idle_event.clear()
+
+            return self.session
+
+    async def _release_session(self):
+
+        async with self._session_lock:
+
+            self._active_requests = max(
+                0,
+                self._active_requests - 1,
             )
 
-    async def _ensure_session(self):
-
-        if self._closing:
-            raise MarketDataError(
-                "Market data service is closed"
-            )
-
-        if self.session is None or self.session.closed:
-            await self.start()
+            if self._active_requests == 0:
+                self._idle_event.set()
 
     # ========================================================
     # HTTP REQUEST
@@ -167,110 +267,97 @@ class MarketData:
         params=None,
     ):
 
-        await self._ensure_session()
+        session = await self._acquire_session()
 
         last_error = None
 
-        for attempt in range(self.retry_attempts + 1):
+        try:
 
-            await self._ensure_session()
+            for attempt in range(self.retry_attempts + 1):
 
-            try:
+                try:
 
-                async with self.session.get(
-                    f"{self.base_url}{endpoint}",
-                    params=params,
-                ) as response:
+                    async with session.get(
+                        f"{self.base_url}{endpoint}",
+                        params=params,
+                    ) as response:
 
-                    if response.status == 429:
-
-                        raise MarketDataError(
-                            "Binance rate limit reached"
-                        )
-
-                    if response.status == 418:
-
-                        raise MarketDataError(
-                            "Binance temporarily blocked this IP"
-                        )
-
-                    if response.status >= 500:
-
-                        last_error = MarketDataError(
-                            f"Binance server error: {response.status}"
-                        )
-
-                    elif response.status != 200:
-
-                        body = await response.text()
-
-                        raise MarketDataError(
-                            f"HTTP {response.status}: {body[:200]}"
-                        )
-
-                    else:
-
-                        data = await response.json(
-                            content_type=None
-                        )
-
-                        if not isinstance(data, (dict, list)):
+                        if response.status == 429:
                             raise MarketDataError(
-                                "Unexpected Binance JSON response"
+                                "Binance rate limit reached"
                             )
 
-                        return data
+                        if response.status == 418:
+                            raise MarketDataError(
+                                "Binance temporarily blocked this IP"
+                            )
 
-            except asyncio.CancelledError:
-                raise
+                        if response.status >= 500:
 
-            except MarketDataError as exc:
+                            last_error = MarketDataError(
+                                f"Binance server error: {response.status}"
+                            )
 
-                message = str(exc).lower()
+                        elif response.status != 200:
 
-                if (
-                    "rate limit" in message
-                    or "blocked this ip" in message
-                    or message.startswith("http 4")
-                ):
+                            body = await response.text()
+
+                            raise MarketDataError(
+                                f"HTTP {response.status}: {body[:200]}"
+                            )
+
+                        else:
+
+                            data = await response.json(
+                                content_type=None
+                            )
+
+                            if not isinstance(data, (dict, list)):
+                                raise MarketDataError(
+                                    "Unexpected Binance JSON response"
+                                )
+
+                            return data
+
+                except asyncio.CancelledError:
                     raise
 
-                last_error = exc
+                except MarketDataError as exc:
 
-            except (
-                aiohttp.ClientError,
-                asyncio.TimeoutError,
-                ValueError,
-            ) as exc:
+                    message = str(exc).lower()
 
-                last_error = exc
+                    if (
+                        "rate limit" in message
+                        or "blocked this ip" in message
+                        or message.startswith("http 4")
+                    ):
+                        raise
 
-            if attempt < self.retry_attempts:
+                    last_error = exc
 
-                delay = min(
-                    2 ** attempt,
-                    8,
-                )
+                except (
+                    aiohttp.ClientError,
+                    asyncio.TimeoutError,
+                    ValueError,
+                ) as exc:
 
-                await asyncio.sleep(delay)
+                    last_error = exc
 
-        raise MarketDataError(
-            f"Request failed: {last_error}"
-        )
+                if attempt < self.retry_attempts:
 
-    # ========================================================
-    # SYMBOL VALIDATION
-    # ========================================================
+                    delay = min(
+                        2 ** attempt,
+                        8,
+                    )
 
-    @staticmethod
-    def _valid_symbol(symbol):
+                    await asyncio.sleep(delay)
 
-        return (
-            isinstance(symbol, str)
-            and bool(symbol)
-            and symbol == symbol.upper()
-            and symbol.isalnum()
-        )
+            raise MarketDataError(
+                f"Request failed: {last_error}"
+            )
+
+        finally:
+            await self._release_session()
 
     # ========================================================
     # EXCHANGE TICKER
@@ -297,9 +384,15 @@ class MarketData:
                     "Invalid ticker response"
                 )
 
-            price = float(data["lastPrice"])
-            volume = float(data["quoteVolume"])
-            change = float(data["priceChangePercent"])
+            try:
+                price = float(data["lastPrice"])
+                volume = float(data["quoteVolume"])
+                change = float(data["priceChangePercent"])
+
+            except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                raise MarketDataError(
+                    "Missing or invalid ticker fields"
+                ) from exc
 
             if not self.valid_number(price) or price <= 0:
                 raise MarketDataError(
@@ -316,15 +409,17 @@ class MarketData:
                     "Invalid price change"
                 )
 
+            timestamp = self.utc_timestamp()
+
             result = {
                 "symbol": symbol,
                 "price": price,
                 "quote_volume": volume,
                 "change_percent": change,
-                "timestamp": self.utc_timestamp(),
+                "timestamp": timestamp,
             }
 
-            self.last_success[symbol] = result["timestamp"]
+            self.last_success[symbol] = timestamp
             self.last_errors.pop(symbol, None)
 
             return result
@@ -366,7 +461,6 @@ class MarketData:
             )
 
         interval = interval or TIMEFRAME
-
         limit = KLINE_LIMIT if limit is None else limit
 
         if (
@@ -376,6 +470,10 @@ class MarketData:
             raise MarketDataError(
                 "Invalid kline interval"
             )
+
+        interval_ms = self._interval_milliseconds(
+            interval
+        )
 
         if (
             isinstance(limit, bool)
@@ -417,16 +515,18 @@ class MarketData:
                 "ignore",
             ]
 
+            if any(
+                not isinstance(item, list) or len(item) < 12
+                for item in raw
+            ):
+                raise MarketDataError(
+                    "Malformed kline row received"
+                )
+
             rows = [
                 item[:12]
                 for item in raw
-                if isinstance(item, list) and len(item) >= 12
             ]
-
-            if not rows:
-                raise MarketDataError(
-                    "Kline response contains no valid rows"
-                )
 
             df = pd.DataFrame(
                 rows,
@@ -454,26 +554,9 @@ class MarketData:
                     errors="coerce",
                 )
 
-            df = df.dropna(
-                subset=numeric_columns
-            )
-
-            df = df.sort_values(
-                "open_time"
-            )
-
-            df = df.drop_duplicates(
-                subset=["open_time"],
-                keep="last",
-            )
-
-            df = df.reset_index(
-                drop=True
-            )
-
-            if df.empty:
+            if df[numeric_columns].isna().any().any():
                 raise MarketDataError(
-                    "No valid candles remain"
+                    "Kline response contains invalid numeric values"
                 )
 
             for column in numeric_columns:
@@ -488,6 +571,38 @@ class MarketData:
                 ):
                     raise MarketDataError(
                         f"Non-finite values in {column}"
+                    )
+
+            # Validate candle timestamps before sorting.
+            if (
+                (df["open_time"] < 0).any()
+                or (df["close_time"] <= df["open_time"]).any()
+            ):
+                raise MarketDataError(
+                    "Invalid candle timestamps"
+                )
+
+            if df["open_time"].duplicated().any():
+                raise MarketDataError(
+                    "Duplicate candle timestamps"
+                )
+
+            df = df.sort_values(
+                "open_time"
+            ).reset_index(drop=True)
+
+            # Validate chronological continuity.
+            if len(df) > 1 and interval_ms is not None:
+
+                differences = (
+                    df["open_time"]
+                    .diff()
+                    .dropna()
+                )
+
+                if not (differences == interval_ms).all():
+                    raise MarketDataError(
+                        "Missing or irregular candles detected"
                     )
 
             price_columns = [
@@ -532,6 +647,7 @@ class MarketData:
                 datetime.now(timezone.utc).timestamp() * 1000
             )
 
+            # Keep completed candles only.
             df = df[
                 df["close_time"] < now_ms
             ].copy()
@@ -544,6 +660,23 @@ class MarketData:
                 raise MarketDataError(
                     "Not enough completed candles"
                 )
+
+            # Reject stale data.
+            latest_close_time = int(
+                df.iloc[-1]["close_time"]
+            )
+
+            if interval_ms is not None:
+
+                maximum_age = max(
+                    interval_ms * 2,
+                    5 * 60 * 1000,
+                )
+
+                if now_ms - latest_close_time > maximum_age:
+                    raise MarketDataError(
+                        "Latest candle is stale"
+                    )
 
             df["timestamp"] = pd.to_datetime(
                 df["open_time"],
@@ -708,6 +841,7 @@ class MarketData:
                 and not self.session.closed
                 and not self._closing
             ),
+            "active_requests": self._active_requests,
             "last_success": dict(
                 self.last_success
             ),
