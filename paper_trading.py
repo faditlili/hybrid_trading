@@ -1,4 +1,3 @@
-import asyncio
 from datetime import datetime, timezone
 
 from config import (
@@ -18,6 +17,7 @@ def utc_now():
 
 
 class PaperTrader:
+
     def __init__(self, database):
         self.db = database
 
@@ -33,6 +33,8 @@ class PaperTrader:
             for p in self.db.positions()
         }
 
+        self.last_prices = {}
+
     def _save_account(self):
         self.db.update_account(
             self.balance,
@@ -42,14 +44,15 @@ class PaperTrader:
         )
 
     def open_position(self, symbol, price, atr):
+
         if symbol in self.positions:
-            return False, "المركز موجود مسبقاً"
+            return False, "Position already exists"
 
         if len(self.positions) >= MAX_OPEN_POSITIONS:
-            return False, "تم بلوغ الحد الأقصى للمراكز"
+            return False, "Maximum positions reached"
 
         if price <= 0 or atr <= 0 or self.balance <= 0:
-            return False, "بيانات غير صالحة"
+            return False, "Invalid market data"
 
         stop_distance = atr * STOP_ATR_MULTIPLIER
 
@@ -65,7 +68,7 @@ class PaperTrader:
         )
 
         if quantity <= 0:
-            return False, "حجم المركز غير صالح"
+            return False, "Invalid position quantity"
 
         entry = price * (
             1 + SIMULATED_SLIPPAGE_BPS / 10000
@@ -77,7 +80,7 @@ class PaperTrader:
         total_cost = allocation + entry_fee
 
         if total_cost > self.balance:
-            return False, "الرصيد الافتراضي غير كافٍ"
+            return False, "Insufficient virtual balance"
 
         stop = entry - stop_distance
 
@@ -98,7 +101,9 @@ class PaperTrader:
         }
 
         self.balance -= total_cost
+
         self.positions[symbol] = position
+        self.last_prices[symbol] = price
 
         self.db.add_position(position)
         self._save_account()
@@ -106,13 +111,14 @@ class PaperTrader:
         return True, position
 
     def close_position(self, symbol, market_price, reason):
+
         position = self.positions.get(symbol)
 
         if not position:
-            return False, "المركز غير موجود"
+            return False, "Position not found"
 
         if market_price <= 0:
-            return False, "سعر الإغلاق غير صالح"
+            return False, "Invalid exit price"
 
         exit_price = market_price * (
             1 - SIMULATED_SLIPPAGE_BPS / 10000
@@ -160,22 +166,28 @@ class PaperTrader:
         self.db.remove_position(symbol)
 
         del self.positions[symbol]
+        self.last_prices.pop(symbol, None)
 
         self._save_account()
 
         return True, trade
 
     async def update_positions(self, market_data):
+
         results = []
 
         for symbol in list(self.positions.keys()):
+
             try:
                 ticker = await market_data.get_ticker(symbol)
                 price = ticker["price"]
 
+                self.last_prices[symbol] = price
+
                 position = self.positions[symbol]
 
                 if price <= position["stop"]:
+
                     ok, result = self.close_position(
                         symbol,
                         price,
@@ -185,6 +197,7 @@ class PaperTrader:
                     results.append((symbol, ok, result))
 
                 elif price >= position["target"]:
+
                     ok, result = self.close_position(
                         symbol,
                         price,
@@ -194,6 +207,7 @@ class PaperTrader:
                     results.append((symbol, ok, result))
 
             except Exception as exc:
+
                 results.append((
                     symbol,
                     False,
@@ -203,14 +217,24 @@ class PaperTrader:
         return results
 
     def summary(self):
+
         reserved = sum(
             p["allocation"]
             for p in self.positions.values()
         )
 
         unrealized = sum(
-            (p["entry"] - p["entry"]) * p["quantity"]
-            for p in self.positions.values()
+            (
+                self.last_prices.get(symbol, p["entry"])
+                - p["entry"]
+            ) * p["quantity"]
+            for symbol, p in self.positions.items()
+        )
+
+        equity = (
+            self.balance
+            + reserved
+            + unrealized
         )
 
         return {
@@ -218,6 +242,7 @@ class PaperTrader:
             "reserved_allocation": reserved,
             "realized_pnl": self.realized_pnl,
             "unrealized_pnl": unrealized,
+            "equity": equity,
             "wins": self.wins,
             "losses": self.losses,
             "open_positions": len(self.positions),
