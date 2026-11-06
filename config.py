@@ -246,8 +246,7 @@ def validate_config():
     if not isinstance(HOST, str) or not HOST:
         errors.append("HOST must be a non-empty string.")
 
-    if (
-        isinstance(PORT, bool)
+    if (isinstance(PORT, bool)
         or not isinstance(PORT, int)
         or not 1 <= PORT <= 65535
     ):
@@ -270,8 +269,7 @@ def validate_config():
     if not isinstance(TIMEFRAME, str) or not TIMEFRAME:
         errors.append("TIMEFRAME must be a non-empty string.")
 
-    if (
-        isinstance(KLINE_LIMIT, bool)
+    if ( isinstance(KLINE_LIMIT, bool)
         or not isinstance(KLINE_LIMIT, int)
         or not 60 <= KLINE_LIMIT <= 1000
     ):
@@ -281,23 +279,25 @@ def validate_config():
         errors.append("MIN_QUOTE_VOLUME must be finite.")
     elif MIN_QUOTE_VOLUME < 0:
         errors.append("MIN_QUOTE_VOLUME cannot be negative.")
-
+    
     if not isinstance(SYMBOLS, list) or not SYMBOLS:
         errors.append("SYMBOLS must be a non-empty list.")
-    else:
-        if len(SYMBOLS) != len(set(SYMBOLS)):
-            errors.append("SYMBOLS contains duplicate entries.")
 
-        for symbol in SYMBOLS:
-    if (
-        not isinstance(symbol, str)
-        or not symbol
-        or symbol != symbol.upper()
-        or symbol.count("-") != 1
-        or not all(part.isalnum() for part in symbol.split("-"))
-    ):
-        errors.append(f"Invalid trading symbol: {symbol!r}")
-                errors.append(f"Invalid trading symbol: {symbol!r}")
+    else:
+        if not all(isinstance(s, str) for s in SYMBOLS):
+            errors.append("All SYMBOLS entries must be strings.")
+        else:
+            if len(SYMBOLS) != len(set(SYMBOLS)):
+                errors.append("SYMBOLS contains duplicate entries.")
+
+            for symbol in SYMBOLS:
+                if ( not symbol
+                    or symbol != symbol.upper()
+                    or symbol.count("-") != 1
+                    or not all(part.isalnum()
+                        for part in symbol.split("-")
+                (:errors.append(f"Invalid trading symbol: {symbol!r}")
+                (errors.append(f"Invalid trading symbol: {symbol!r}")
 
     # --------------------------------------------------------
     # ENGINE
@@ -378,23 +378,20 @@ def validate_config():
     if not _valid_https_url(HF_API_URL):
         errors.append("HF_API_URL must be a valid HTTPS URL.")
 
-    if (
-        isinstance(AI_REQUEST_TIMEOUT_SECONDS, bool)
+    if not isinstance(AI_REQUEST_TIMEOUT_SECONDS, bool)
         or not isinstance(AI_REQUEST_TIMEOUT_SECONDS, (int, float))
         or not _is_finite_number(AI_REQUEST_TIMEOUT_SECONDS)
         or AI_REQUEST_TIMEOUT_SECONDS <= 0
     ):
         errors.append("AI_REQUEST_TIMEOUT_SECONDS must be positive.")
 
-    if (
-        isinstance(AI_MAX_CONCURRENT_REQUESTS, bool)
+    if (isinstance(AI_MAX_CONCURRENT_REQUESTS, bool)
         or not isinstance(AI_MAX_CONCURRENT_REQUESTS, int)
         or AI_MAX_CONCURRENT_REQUESTS < 1
     ):
         errors.append("AI_MAX_CONCURRENT_REQUESTS must be at least 1.")
 
-    if (
-        isinstance(AI_MIN_VALID_MODELS, bool)
+    if (isinstance(AI_MIN_VALID_MODELS, bool)
         or not isinstance(AI_MIN_VALID_MODELS, int)
         or AI_MIN_VALID_MODELS < 1
     ):
