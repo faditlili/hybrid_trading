@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import logging
+import os
 
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -81,6 +82,54 @@ SERVER_PORT = get_server_port()
 
 
 # ============================================================
+# DASHBOARD AUTHENTICATION
+# ============================================================
+
+def get_dashboard_auth():
+
+    username = os.getenv(
+        "DASHBOARD_USERNAME",
+        ""
+    ).strip()
+
+    password = os.getenv(
+        "DASHBOARD_PASSWORD",
+        ""
+    )
+
+    if not username or not password:
+
+        raise RuntimeError(
+            "Dashboard authentication is required. "
+            "Set DASHBOARD_USERNAME and DASHBOARD_PASSWORD."
+        )
+
+    if len(username) > 100:
+
+        raise ValueError(
+            "DASHBOARD_USERNAME is too long"
+        )
+
+    if len(password) < 16:
+
+        raise ValueError(
+            "DASHBOARD_PASSWORD must contain "
+            "at least 16 characters"
+        )
+
+    if len(password) > 256:
+
+        raise ValueError(
+            "DASHBOARD_PASSWORD is too long"
+        )
+
+    return username, password
+
+
+DASHBOARD_AUTH = get_dashboard_auth()
+
+
+# ============================================================
 # CORE COMPONENTS
 # ============================================================
 
@@ -137,10 +186,13 @@ def safe_count(value):
         return 0
 
     try:
+
         result = int(value)
+
         return max(0, result)
 
     except (TypeError, ValueError, OverflowError):
+
         return 0
 
 
@@ -154,11 +206,13 @@ def safe_status_text(
         return default
 
     try:
+
         result = str(value).strip()
 
         return result[:limit] if result else default
 
     except Exception:
+
         return default
 
 
@@ -192,14 +246,17 @@ async def stop_scanner():
         task.cancel()
 
     try:
+
         await task
 
     except asyncio.CancelledError:
+
         logger.info(
             "Scanner task stopped"
         )
 
     except Exception:
+
         logger.exception(
             "Scanner task failed during shutdown"
         )
@@ -266,9 +323,11 @@ async def shutdown_components():
     # --------------------------------------------------------
 
     try:
+
         engine.running = False
 
     except Exception:
+
         logger.exception(
             "Could not stop engine"
         )
@@ -349,6 +408,7 @@ async def lifespan(app: FastAPI):
         await engine.start()
 
         if not getattr(engine, "running", False):
+
             raise RuntimeError(
                 "Trading engine did not start"
             )
@@ -375,12 +435,14 @@ async def lifespan(app: FastAPI):
             )
 
         except asyncio.CancelledError:
+
             raise
 
         except Exception:
 
             logger.exception(
-                "Telegram startup failed; continuing without Telegram"
+                "Telegram startup failed; "
+                "continuing without Telegram"
             )
 
         # ----------------------------------------------------
@@ -388,6 +450,7 @@ async def lifespan(app: FastAPI):
         # ----------------------------------------------------
 
         startup_completed = True
+
         application_state = "RUNNING"
 
         logger.info(
@@ -457,13 +520,25 @@ async def health():
     )
 
     return {
-        "status": "ok" if healthy else "degraded",
+
+        "status": (
+            "ok"
+            if healthy
+            else "degraded"
+        ),
+
         "application": APP_NAME,
+
         "version": APP_VERSION,
+
         "application_state": application_state,
+
         "running": engine_running,
+
         "scanner_active": scanner_active,
+
         "paper_trading_only": True,
+
     }
 
 
@@ -600,6 +675,7 @@ app = gr.mount_gradio_app(
     api_app,
     demo,
     path="/",
+    auth=DASHBOARD_AUTH,
 )
 
 
