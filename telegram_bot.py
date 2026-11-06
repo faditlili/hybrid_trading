@@ -10,7 +10,7 @@ from telegram.ext import (
 
 from config import (
     TELEGRAM_TOKEN,
-    ALLOWED_ADMIN_ID
+    TELEGRAM_ADMIN_ID
 )
 
 
@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 def safe_float(value, default=0.0):
 
     try:
-
         result = float(value)
 
         if not math.isfinite(result):
@@ -29,8 +28,35 @@ def safe_float(value, default=0.0):
         return result
 
     except (TypeError, ValueError, OverflowError):
-
         return default
+
+
+def safe_text(value, default="UNKNOWN", max_length=200):
+
+    if value is None:
+        return default
+
+    try:
+        result = str(value).strip()
+
+        if not result:
+            return default
+
+        return result[:max_length]
+
+    except Exception:
+        return default
+
+
+def safe_count(value):
+
+    try:
+        result = int(value)
+
+        return max(0, result)
+
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 class TelegramController:
@@ -41,29 +67,27 @@ class TelegramController:
         self.trader = trader
 
         self.application = None
-        self.started = False
 
+        self.started = False
         self.initialized = False
         self.application_started = False
         self.polling_started = False
 
+        self.admin_id = None
+
         try:
 
-            self.admin_id = (
-                int(ALLOWED_ADMIN_ID)
-                if ALLOWED_ADMIN_ID
-                else None
-            )
+            if TELEGRAM_ADMIN_ID is not None:
 
-            if self.admin_id is not None and self.admin_id <= 0:
-                self.admin_id = None
+                admin_id = int(TELEGRAM_ADMIN_ID)
+
+                if admin_id > 0:
+                    self.admin_id = admin_id
 
         except (TypeError, ValueError, OverflowError):
 
-            self.admin_id = None
-
             logger.error(
-                "Invalid ALLOWED_ADMIN_ID configuration"
+                "Invalid TELEGRAM_ADMIN_ID configuration"
             )
 
     async def authorized(self, update: Update):
@@ -106,7 +130,7 @@ class TelegramController:
 
         await message.reply_text(
             "مرحباً بك في AI QUANT.\n\n"
-            "النظام يعمل بالمحاكاة الافتراضية فقط.\n\n"
+            "النظام يعمل بالمحاكاة الورقية فقط.\n\n"
             "الأوامر المتاحة:\n"
             "/status - حالة النظام والرصيد\n"
             "/scan - فحص السوق\n"
@@ -132,9 +156,15 @@ class TelegramController:
 
         try:
 
-            summary = self.trader.get_summary() or {}
+            summary = self.trader.get_summary()
+
+            if not isinstance(summary, dict):
+                summary = {}
 
             positions = summary.get("positions") or []
+
+            if not isinstance(positions, list):
+                positions = []
 
             balance = safe_float(
                 summary.get("balance")
@@ -160,22 +190,30 @@ class TelegramController:
                 summary.get("win_rate")
             )
 
-            regime = getattr(
-                self.engine,
-                "market_regime",
-                "UNKNOWN"
+            regime = safe_text(
+                getattr(
+                    self.engine,
+                    "market_regime",
+                    "UNKNOWN"
+                )
             )
 
-            last_scan = getattr(
-                self.engine,
-                "last_scan",
-                None
-            ) or "Not scanned yet"
+            last_scan = safe_text(
+                getattr(
+                    self.engine,
+                    "last_scan",
+                    None
+                ),
+                default="لم يتم الفحص بعد",
+                max_length=150
+            )
 
-            running = getattr(
-                self.engine,
-                "running",
-                False
+            running = bool(
+                getattr(
+                    self.engine,
+                    "running",
+                    False
+                )
             )
 
             status = (
@@ -199,7 +237,7 @@ class TelegramController:
                 "MODE: PAPER TRADING ONLY"
             )
 
-            await message.reply_text(text)
+            await message.reply_text(text[:3900])
 
         except Exception:
 
@@ -227,10 +265,25 @@ class TelegramController:
         if not message:
             return
 
-        if self.engine.scan_lock.locked():
+        scan_lock = getattr(
+            self.engine,
+            "scan_lock",
+            None
+        )
+
+        if scan_lock is not None and scan_lock.locked():
 
             await message.reply_text(
                 "هناك فحص جارٍ حالياً. انتظر حتى ينتهي."
+            )
+
+            return
+
+        if not getattr(self.engine, "running", False):
+
+            await message.reply_text(
+                "محرك النظام متوقف حالياً. "
+                "لا يمكن بدء الفحص."
             )
 
             return
@@ -247,7 +300,10 @@ class TelegramController:
             if not isinstance(result, dict):
                 result = {}
 
-            result_status = result.get("status")
+            result_status = safe_text(
+                result.get("status"),
+                default="UNKNOWN"
+            )
 
             stats = result.get("stats") or {}
 
@@ -256,29 +312,51 @@ class TelegramController:
 
             if result_status == "COMPLETED":
 
+                regime = safe_text(
+                    result.get("regime")
+                )
+
+                scanned = safe_count(
+                    stats.get("scanned")
+                )
+
+                approved = safe_count(
+                    stats.get("approved")
+                )
+
+                rejected = safe_count(
+                    stats.get("rejected")
+                )
+
+                errors = safe_count(
+                    stats.get("errors")
+                )
+
                 text = (
                     "اكتمل الفحص.\n\n"
-                    f"Market Regime: "
-                    f"{result.get('regime', 'UNKNOWN')}\n"
-                    f"Scanned: {stats.get('scanned', 0)}\n"
-                    f"Approved: {stats.get('approved', 0)}\n"
-                    f"Rejected: {stats.get('rejected', 0)}\n"
-                    f"Errors: {stats.get('errors', 0)}"
+                    f"Market Regime: {regime}\n"
+                    f"Scanned: {scanned}\n"
+                    f"Approved: {approved}\n"
+                    f"Rejected: {rejected}\n"
+                    f"Errors: {errors}\n\n"
+                    "MODE: PAPER TRADING ONLY"
                 )
 
             else:
 
-                error_message = result.get(
-                    "message",
-                    result_status or "Unknown result"
+                error_message = safe_text(
+                    result.get("message"),
+                    default=result_status,
+                    max_length=500
                 )
 
                 text = (
                     "تعذر إكمال الفحص.\n\n"
-                    f"التفاصيل: {str(error_message)[:500]}"
+                    f"الحالة: {result_status}\n"
+                    f"التفاصيل: {error_message}"
                 )
 
-            await message.reply_text(text)
+            await message.reply_text(text[:3900])
 
         except Exception as exc:
 
@@ -310,12 +388,15 @@ class TelegramController:
 
         try:
 
-            summary = self.trader.get_summary() or {}
+            summary = self.trader.get_summary()
 
-            positions = summary.get(
-                "positions",
-                []
-            ) or []
+            if not isinstance(summary, dict):
+                summary = {}
+
+            positions = summary.get("positions") or []
+
+            if not isinstance(positions, list):
+                positions = []
 
             if not positions:
 
@@ -326,13 +407,17 @@ class TelegramController:
                 return
 
             lines = [
-                "OPEN PAPER POSITIONS\n"
+                "OPEN PAPER POSITIONS",
+                ""
             ]
 
             for position in positions:
 
-                symbol = str(
-                    position.get("symbol", "UNKNOWN")
+                if not isinstance(position, dict):
+                    continue
+
+                symbol = safe_text(
+                    position.get("symbol")
                 )
 
                 entry = safe_float(
@@ -367,10 +452,12 @@ class TelegramController:
 
             text = "\n".join(lines)
 
-            # Telegram message length protection.
-            if len(text) > 4000:
+            if len(text) > 3900:
 
-                text = text[:3900] + "\n\nMessage truncated."
+                text = (
+                    text[:3700]
+                    + "\n\nتم اختصار الرسالة بسبب طولها."
+                )
 
             await message.reply_text(text)
 
@@ -449,12 +536,15 @@ class TelegramController:
 
             self.application_started = True
 
-            if self.application.updater:
+            if self.application.updater is None:
 
-                await self.application.updater.start_polling()
+                raise RuntimeError(
+                    "Telegram updater is unavailable"
+                )
 
-                self.polling_started = True
+            await self.application.updater.start_polling()
 
+            self.polling_started = True
             self.started = True
 
             logger.info(
@@ -479,7 +569,7 @@ class TelegramController:
         try:
 
             if (
-                application.updater
+                application.updater is not None
                 and self.polling_started
                 and application.updater.running
             ):
