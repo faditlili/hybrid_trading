@@ -280,9 +280,8 @@ def validate_config():
     elif MIN_QUOTE_VOLUME < 0:
         errors.append("MIN_QUOTE_VOLUME cannot be negative.")
     
-    if not isinstance(SYMBOLS, list) or not SYMBOLS:
+        if not isinstance(SYMBOLS, list) or not SYMBOLS:
         errors.append("SYMBOLS must be a non-empty list.")
-
     else:
         if not all(isinstance(s, str) for s in SYMBOLS):
             errors.append("All SYMBOLS entries must be strings.")
@@ -291,13 +290,18 @@ def validate_config():
                 errors.append("SYMBOLS contains duplicate entries.")
 
             for symbol in SYMBOLS:
-                if ( not symbol
+                if (
+                    not symbol
                     or symbol != symbol.upper()
                     or symbol.count("-") != 1
-                    or not all(part.isalnum()
+                    or not all(
+                        part.isalnum()
                         for part in symbol.split("-")
-                (:errors.append(f"Invalid trading symbol: {symbol!r}")
-                (errors.append(f"Invalid trading symbol: {symbol!r}")
+                    )
+                ):
+                    errors.append(
+                        f"Invalid trading symbol: {symbol!r}"
+                    )
 
     # --------------------------------------------------------
     # ENGINE
