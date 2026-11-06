@@ -28,10 +28,6 @@ class Database:
 
         self._init()
 
-    # ======================================
-    # INITIALIZATION
-    # ======================================
-
     def _init(self):
 
         with self.conn:
@@ -85,6 +81,7 @@ class Database:
                     score INTEGER,
                     action TEXT NOT NULL,
                     reasons TEXT NOT NULL,
+                    ai_vote TEXT DEFAULT 'N/A',
                     created_at TEXT NOT NULL
                 )
             """)
@@ -98,6 +95,22 @@ class Database:
                 )
             """)
 
+            # ترحيل قاعدة بيانات قديمة:
+            # إضافة ai_vote إن لم يكن موجوداً
+            decision_columns = {
+                row["name"]
+                for row in cur.execute(
+                    "PRAGMA table_info(decisions)"
+                ).fetchall()
+            }
+
+            if "ai_vote" not in decision_columns:
+
+                cur.execute("""
+                    ALTER TABLE decisions
+                    ADD COLUMN ai_vote TEXT DEFAULT 'N/A'
+                """)
+
             cur.execute(
                 "SELECT id FROM account WHERE id=1"
             )
@@ -106,12 +119,8 @@ class Database:
 
                 cur.execute("""
                     INSERT INTO account(
-                        id,
-                        balance,
-                        realized_pnl,
-                        wins,
-                        losses,
-                        updated_at
+                        id, balance, realized_pnl,
+                        wins, losses, updated_at
                     )
                     VALUES(1, ?, 0, 0, 0, ?)
                 """, (
@@ -119,17 +128,18 @@ class Database:
                     now_iso()
                 ))
 
-    # ======================================
     # ACCOUNT
-    # ======================================
 
-    def account(self):
+    def get_account(self):
 
         row = self.conn.execute(
             "SELECT * FROM account WHERE id=1"
         ).fetchone()
 
         return dict(row)
+
+    def account(self):
+        return self.get_account()
 
     def update_account(
         self,
@@ -157,11 +167,9 @@ class Database:
                 now_iso()
             ))
 
-    # ======================================
     # POSITIONS
-    # ======================================
 
-    def positions(self):
+    def get_positions(self):
 
         rows = self.conn.execute("""
             SELECT *
@@ -170,51 +178,24 @@ class Database:
         """).fetchall()
 
         return [
-            dict(row)
+            {
+                "symbol": row["symbol"],
+                "side": row["side"],
+                "quantity": row["quantity"],
+                "entry_price": row["entry"],
+                "stop_loss": row["stop"],
+                "take_profit": row["target"],
+                "allocation": row["allocation"],
+                "entry_fee": row["entry_fee"],
+                "opened_at": row["opened_at"]
+            }
             for row in rows
         ]
 
-    def add_position(self, position):
+    def positions(self):
+        return self.get_positions()
 
-        with self.conn:
-
-            self.conn.execute("""
-                INSERT INTO positions(
-                    symbol,
-                    side,
-                    quantity,
-                    entry,
-                    stop,
-                    target,
-                    allocation,
-                    entry_fee,
-                    opened_at
-                )
-                VALUES(?,?,?,?,?,?,?,?,?)
-            """, (
-                position["symbol"],
-                position["side"],
-                position["quantity"],
-                position["entry"],
-                position["stop"],
-                position["target"],
-                position["allocation"],
-                position["entry_fee"],
-                position["opened_at"]
-            ))
-
-    def remove_position(self, symbol):
-
-        with self.conn:
-
-            self.conn.execute(
-                "DELETE FROM positions WHERE symbol=?",
-                (symbol,)
-            )
-
-    # ======================================
-    # ATOMIC POSITION OPEN
-    # ======================================
+    # ATOMIC OPEN
 
     def open_position_atomic(
         self,
@@ -231,30 +212,24 @@ class Database:
 
                 self.conn.execute("""
                     INSERT INTO positions(
-                        symbol,
-                        side,
-                        quantity,
-                        entry,
-                        stop,
-                        target,
-                        allocation,
-                        entry_fee,
-                        opened_at
+                        symbol, side, quantity, entry,
+                        stop, target, allocation,
+                        entry_fee, opened_at
                     )
                     VALUES(?,?,?,?,?,?,?,?,?)
                 """, (
                     position["symbol"],
-                    position["side"],
+                    "BUY",
                     position["quantity"],
-                    position["entry"],
-                    position["stop"],
-                    position["target"],
+                    position["entry_price"],
+                    position["stop_loss"],
+                    position["take_profit"],
                     position["allocation"],
                     position["entry_fee"],
-                    position["opened_at"]
+                    now_iso()
                 ))
 
-                self.conn.execute("""
+                cur = self.conn.execute("""
                     UPDATE account
                     SET balance=?,
                         realized_pnl=?,
@@ -270,14 +245,15 @@ class Database:
                     now_iso()
                 ))
 
+                if cur.rowcount != 1:
+                    raise RuntimeError("Account missing")
+
             return True
 
-        except sqlite3.Error:
+        except Exception:
             return False
 
-    # ======================================
-    # ATOMIC POSITION CLOSE
-    # ======================================
+    # ATOMIC CLOSE
 
     def close_position_atomic(
         self,
@@ -293,29 +269,32 @@ class Database:
 
             with self.conn:
 
+                position = self.conn.execute("""
+                    SELECT opened_at
+                    FROM positions
+                    WHERE symbol=?
+                """, (symbol,)).fetchone()
+
+                if not position:
+                    raise RuntimeError("Position missing")
+
                 self.conn.execute("""
                     INSERT INTO trades(
-                        symbol,
-                        side,
-                        entry,
-                        exit,
-                        quantity,
-                        pnl,
-                        reason,
-                        opened_at,
-                        closed_at
+                        symbol, side, entry, exit,
+                        quantity, pnl, reason,
+                        opened_at, closed_at
                     )
                     VALUES(?,?,?,?,?,?,?,?,?)
                 """, (
                     trade["symbol"],
-                    trade["side"],
-                    trade["entry"],
-                    trade["exit"],
+                    "BUY",
+                    trade["entry_price"],
+                    trade["exit_price"],
                     trade["quantity"],
-                    trade["pnl"],
+                    trade["net_pnl"],
                     trade["reason"],
-                    trade["opened_at"],
-                    trade["closed_at"]
+                    position["opened_at"],
+                    now_iso()
                 ))
 
                 cur = self.conn.execute("""
@@ -324,11 +303,9 @@ class Database:
                 """, (symbol,))
 
                 if cur.rowcount != 1:
-                    raise RuntimeError(
-                        "Position does not exist in database"
-                    )
+                    raise RuntimeError("Position deletion failed")
 
-                self.conn.execute("""
+                cur = self.conn.execute("""
                     UPDATE account
                     SET balance=?,
                         realized_pnl=?,
@@ -344,92 +321,89 @@ class Database:
                     now_iso()
                 ))
 
+                if cur.rowcount != 1:
+                    raise RuntimeError("Account missing")
+
             return True
 
         except Exception:
             return False
 
-    # ======================================
-    # TRADES
-    # ======================================
-
-    def add_trade(self, trade):
-
-        with self.conn:
-
-            self.conn.execute("""
-                INSERT INTO trades(
-                    symbol,
-                    side,
-                    entry,
-                    exit,
-                    quantity,
-                    pnl,
-                    reason,
-                    opened_at,
-                    closed_at
-                )
-                VALUES(?,?,?,?,?,?,?,?,?)
-            """, (
-                trade["symbol"],
-                trade["side"],
-                trade["entry"],
-                trade["exit"],
-                trade["quantity"],
-                trade["pnl"],
-                trade["reason"],
-                trade["opened_at"],
-                trade["closed_at"]
-            ))
-
-    # ======================================
     # DECISIONS
-    # ======================================
 
-    def log_decision(
-        self,
-        symbol,
-        score,
-        action,
-        reasons
-    ):
+    def log_decision(self, decision, *args):
+
+        # دعم الصيغة القديمة والجديدة
+        if isinstance(decision, dict):
+
+            data = decision
+
+        else:
+
+            data = {
+                "symbol": decision,
+                "score": args[0],
+                "action": args[1],
+                "reasons": args[2]
+            }
 
         with self.conn:
 
             self.conn.execute("""
                 INSERT INTO decisions(
-                    symbol,
-                    score,
-                    action,
-                    reasons,
-                    created_at
+                    symbol, score, action,
+                    reasons, ai_vote, created_at
                 )
-                VALUES(?,?,?,?,?)
+                VALUES(?,?,?,?,?,?)
             """, (
-                symbol,
-                score,
-                action,
+                data["symbol"],
+                data.get("score", 0),
+                data.get("action", "WAIT"),
                 json.dumps(
-                    reasons,
+                    data.get("reasons", []),
                     ensure_ascii=False
                 ),
-                now_iso()
+                data.get("ai_vote", "N/A"),
+                data.get("timestamp", now_iso())
             ))
 
-    # ======================================
+    def get_recent_decisions(self, limit=15):
+
+        rows = self.recent("decisions", limit)
+
+        for row in rows:
+
+            try:
+                row["reasons"] = json.loads(row["reasons"])
+            except (TypeError, ValueError):
+                row["reasons"] = []
+
+        return rows
+
+    # TRADES
+
+    def get_recent_trades(self, limit=15):
+
+        rows = self.recent("trades", limit)
+
+        return [
+            {
+                **row,
+                "entry_price": row["entry"],
+                "exit_price": row["exit"],
+                "net_pnl": row["pnl"]
+            }
+            for row in rows
+        ]
+
     # EVENTS
-    # ======================================
 
     def log_event(self, level, message):
 
         with self.conn:
 
             self.conn.execute("""
-                INSERT INTO events(
-                    level,
-                    message,
-                    created_at
-                )
+                INSERT INTO events(level, message, created_at)
                 VALUES(?,?,?)
             """, (
                 level,
@@ -437,9 +411,7 @@ class Database:
                 now_iso()
             ))
 
-    # ======================================
     # HISTORY
-    # ======================================
 
     def recent(self, table, limit=30):
 
@@ -469,9 +441,7 @@ class Database:
             for row in rows
         ]
 
-    # ======================================
     # CLEANUP
-    # ======================================
 
     def close(self):
 
