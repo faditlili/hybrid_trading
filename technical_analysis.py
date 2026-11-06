@@ -2,19 +2,33 @@ import pandas as pd
 
 
 def calculate_indicators(candles):
-    if candles is None or len(candles) < 60:
+
+    if candles is None or len(candles) < 61:
         raise ValueError("Not enough candle data")
 
-    df = candles.copy()
+    # تجاهل الشمعة الأخيرة غير المكتملة
+    df = candles.iloc[:-1].copy().reset_index(drop=True)
 
     close = df["close"]
     high = df["high"]
     low = df["low"]
 
-    df["ema9"] = close.ewm(span=9, adjust=False).mean()
-    df["ema21"] = close.ewm(span=21, adjust=False).mean()
-    df["ema50"] = close.ewm(span=50, adjust=False).mean()
+    df["ema9"] = close.ewm(
+        span=9,
+        adjust=False
+    ).mean()
 
+    df["ema21"] = close.ewm(
+        span=21,
+        adjust=False
+    ).mean()
+
+    df["ema50"] = close.ewm(
+        span=50,
+        adjust=False
+    ).mean()
+
+    # RSI
     delta = close.diff()
 
     gain = delta.clip(lower=0)
@@ -33,8 +47,20 @@ def calculate_indicators(candles):
     ).mean()
 
     rs = avg_gain / avg_loss.replace(0, float("nan"))
+
     df["rsi"] = 100 - (100 / (1 + rs))
 
+    df.loc[
+        (avg_loss == 0) & (avg_gain > 0),
+        "rsi"
+    ] = 100
+
+    df.loc[
+        (avg_loss == 0) & (avg_gain == 0),
+        "rsi"
+    ] = 50
+
+    # ATR
     previous_close = close.shift(1)
 
     tr = pd.concat(
@@ -52,16 +78,28 @@ def calculate_indicators(candles):
         adjust=False
     ).mean()
 
-    ema12 = close.ewm(span=12, adjust=False).mean()
-    ema26 = close.ewm(span=26, adjust=False).mean()
+    # MACD
+    ema12 = close.ewm(
+        span=12,
+        adjust=False
+    ).mean()
+
+    ema26 = close.ewm(
+        span=26,
+        adjust=False
+    ).mean()
 
     df["macd"] = ema12 - ema26
+
     df["macd_signal"] = df["macd"].ewm(
         span=9,
         adjust=False
     ).mean()
 
-    df["volume_avg"] = df["volume"].rolling(20).mean()
+    # Volume
+    df["volume_avg"] = df["volume"].rolling(
+        20
+    ).mean()
 
     last = df.iloc[-1]
     previous = df.iloc[-2]
@@ -84,7 +122,9 @@ def calculate_indicators(candles):
         pd.isna(value)
         for value in result.values()
     ):
-        raise ValueError("Indicator calculation returned invalid values")
+        raise ValueError(
+            "Indicator calculation returned invalid values"
+        )
 
     if result["atr"] <= 0:
         raise ValueError("Invalid ATR value")
