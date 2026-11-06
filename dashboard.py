@@ -1,237 +1,323 @@
 import gradio as gr
 from datetime import datetime
 
-from config import APP_NAME
+
+CSS = """
+.gradio-container {
+    max-width: 1100px !important;
+    margin: auto !important;
+    background: #080d18 !important;
+    color: #e5f3ff !important;
+}
+
+body {
+    background: #080d18 !important;
+}
+
+#main-title {
+    text-align: center;
+    color: #00e5ff;
+    font-size: 30px;
+    font-weight: 900;
+    letter-spacing: 3px;
+}
+
+.subtitle {
+    text-align: center;
+    color: #7f9db8;
+    font-size: 12px;
+}
+
+.metric {
+    background: #101b2d;
+    border: 1px solid #173a55;
+    border-radius: 14px;
+    padding: 15px;
+    text-align: center;
+}
+
+.metric-label {
+    color: #8ba8c1;
+    font-size: 12px;
+}
+
+.metric-value {
+    color: #00e5ff;
+    font-size: 23px;
+    font-weight: bold;
+}
+
+.status {
+    color: #00e5a8;
+    font-weight: bold;
+}
+
+button {
+    border-radius: 10px !important;
+}
+
+@media (max-width: 600px) {
+    #main-title {
+        font-size: 23px;
+    }
+
+    .metric-value {
+        font-size: 19px;
+    }
+
+    .gradio-container {
+        padding: 8px !important;
+    }
+}
+"""
 
 
-def create_dashboard(controller):
-    def render():
+def money(value):
+    return f"{float(value):.4f} USDT"
+
+
+def build_dashboard(controller):
+
+    def get_dashboard():
+
         trader = controller.trader
-        summary = trader.summary()
+        engine = controller.engine
+        db = controller.db
 
-        positions = trader.db.positions()
-        decisions = trader.db.recent("decisions", 15)
-        trades = trader.db.recent("trades", 15)
-        events = trader.db.recent("events", 10)
+        summary = trader.get_summary()
 
         status = (
-            "RUNNING"
-            if controller.running
+            "ONLINE"
+            if engine.running
             else "STOPPED"
         )
 
-        position_rows = [
-            [
-                p["symbol"],
-                round(p["entry"], 8),
-                round(p["stop"], 8),
-                round(p["target"], 8),
-                round(p["quantity"], 6)
-            ]
-            for p in positions
-        ]
+        last_scan = (
+            engine.last_scan
+            or "Not scanned yet"
+        )
 
-        decision_rows = [
-            [
-                d["symbol"],
-                d["score"],
-                d["action"],
-                d["created_at"][:19]
-            ]
-            for d in decisions
-        ]
+        regime = engine.market_regime
 
-        trade_rows = [
-            [
-                t["symbol"],
-                round(t["entry"], 8),
-                round(t["exit"], 8),
-                round(t["pnl"], 4),
-                t["reason"]
-            ]
-            for t in trades
-        ]
+        account_html = f"""
+        <div style="display:grid;
+                    grid-template-columns:repeat(2,minmax(0,1fr));
+                    gap:10px;">
 
-        event_rows = [
-            [
-                e["level"],
-                e["message"],
-                e["created_at"][:19]
-            ]
-            for e in events
-        ]
+            <div class="metric">
+                <div class="metric-label">AVAILABLE BALANCE</div>
+                <div class="metric-value">{money(summary['balance'])}</div>
+            </div>
+
+            <div class="metric">
+                <div class="metric-label">TOTAL EQUITY</div>
+                <div class="metric-value">{money(summary['equity'])}</div>
+            </div>
+
+            <div class="metric">
+                <div class="metric-label">REALIZED P/L</div>
+                <div class="metric-value">{money(summary['realized_pnl'])}</div>
+            </div>
+
+            <div class="metric">
+                <div class="metric-label">UNREALIZED P/L</div>
+                <div class="metric-value">{money(summary['unrealized_pnl'])}</div>
+            </div>
+
+            <div class="metric">
+                <div class="metric-label">RESERVED CAPITAL</div>
+                <div class="metric-value">{money(summary['reserved'])}</div>
+            </div>
+
+            <div class="metric">
+                <div class="metric-label">WIN RATE</div>
+                <div class="metric-value">{summary['win_rate']:.1f}%</div>
+            </div>
+        </div>
+        """
+
+        status_html = f"""
+        <div class="metric">
+            <div class="status">SYSTEM: {status}</div>
+            <div>MARKET REGIME: {regime}</div>
+            <div style="font-size:12px;color:#8ba8c1;">
+                LAST SCAN: {last_scan}
+            </div>
+            <div style="font-size:12px;color:#8ba8c1;">
+                MODE: PAPER TRADING ONLY
+            </div>
+            <div style="font-size:12px;color:#ffb86b;">
+                {engine.last_error or ""}
+            </div>
+        </div>
+        """
+
+        positions = summary["positions"]
+
+        if positions:
+
+            position_rows = []
+
+            for p in positions:
+
+                position_rows.append(
+                    f"| {p['symbol']} "
+                    f"| {float(p['entry_price']):.6f} "
+                    f"| {float(p['current_price']):.6f} "
+                    f"| {float(p['unrealized_pnl']):.4f} |"
+                )
+
+            positions_md = (
+                "| SYMBOL | ENTRY | CURRENT | P/L |\n"
+                "|---|---:|---:|---:|\n"
+                + "\n".join(position_rows)
+            )
+
+        else:
+            positions_md = "لا توجد صفقات افتراضية مفتوحة."
+
+        decisions = db.get_recent_decisions(15)
+
+        if decisions:
+
+            decision_rows = []
+
+            for d in decisions:
+
+                decision_rows.append(
+                    f"| {d['symbol']} "
+                    f"| {d['action']} "
+                    f"| {d['score']} "
+                    f"| {d.get('ai_vote', 'N/A')} |"
+                )
+
+            decisions_md = (
+                "| SYMBOL | ACTION | SCORE | AI |\n"
+                "|---|---|---:|---|\n"
+                + "\n".join(decision_rows)
+            )
+
+        else:
+            decisions_md = "لا توجد قرارات مسجلة بعد."
+
+        trades = db.get_recent_trades(15)
+
+        if trades:
+
+            trade_rows = []
+
+            for t in trades:
+
+                trade_rows.append(
+                    f"| {t['symbol']} "
+                    f"| {float(t['entry_price']):.6f} "
+                    f"| {float(t['exit_price']):.6f} "
+                    f"| {float(t['net_pnl']):.4f} "
+                    f"| {t['reason']} |"
+                )
+
+            trades_md = (
+                "| SYMBOL | ENTRY | EXIT | NET P/L | REASON |\n"
+                "|---|---:|---:|---:|---|\n"
+                + "\n".join(trade_rows)
+            )
+
+        else:
+            trades_md = "لا يوجد سجل صفقات بعد."
 
         return (
-            status,
-            round(summary["available_balance"], 4),
-            round(summary["realized_pnl"], 4),
-            summary["open_positions"],
-            position_rows,
-            decision_rows,
-            trade_rows,
-            event_rows
+            account_html,
+            status_html,
+            positions_md,
+            decisions_md,
+            trades_md
         )
 
     async def force_scan():
-        await controller.scan_once()
-        return render()
 
-    with gr.Blocks(
-        title=APP_NAME,
-        theme=gr.themes.Base(
-            primary_hue="cyan",
-            secondary_hue="blue",
-            neutral_hue="slate"
-        ),
-        css="""
-        body {
-            background: #050914 !important;
-        }
+        results = await controller.engine.scan_once()
 
-        .gradio-container {
-            max-width: 1100px !important;
-            margin: auto !important;
-            background: #050914 !important;
-            color: #e6f7ff !important;
-        }
-
-        .panel {
-            border: 1px solid #12384a !important;
-            border-radius: 14px !important;
-            background: #091522 !important;
-        }
-
-        h1, h2, h3 {
-            color: #00d9ff !important;
-        }
-
-        button {
-            border-radius: 10px !important;
-        }
-
-        @media (max-width: 600px) {
-            .gradio-container {
-                padding: 8px !important;
-            }
-        }
-        """
-    ) as demo:
-
-        gr.Markdown(
-            f"""
-            # ◈ {APP_NAME}
-
-            ### AUTONOMOUS PAPER-TRADING SYSTEM
-
-            <small>SIMULATION ONLY · NO REAL ORDERS</small>
-            """
+        message = (
+            f"اكتمل الفحص. عدد النتائج: {len(results)}"
         )
 
+        return message, *get_dashboard()
+
+    with gr.Blocks(
+        css=CSS,
+        title="AI QUANT"
+    ) as demo:
+
+        gr.HTML("""
+        <div id="main-title">AI QUANT</div>
+        <div class="subtitle">
+            AUTONOMOUS MARKET ANALYSIS SYSTEM
+        </div>
+        <div class="subtitle">
+            SIMULATION MODE · NO REAL ORDERS
+        </div>
+        """)
+
         with gr.Row():
-            status = gr.Textbox(
-                label="ENGINE STATUS",
-                interactive=False
-            )
+            account = gr.HTML()
 
-            balance = gr.Number(
-                label="AVAILABLE VIRTUAL BALANCE",
-                interactive=False
-            )
+        status = gr.HTML()
 
-        with gr.Row():
-            pnl = gr.Number(
-                label="REALIZED P/L",
-                interactive=False
-            )
+        gr.Markdown("## OPEN POSITIONS")
+        positions = gr.Markdown()
 
-            open_count = gr.Number(
-                label="OPEN POSITIONS",
-                interactive=False
-            )
+        gr.Markdown("## MARKET DECISIONS")
+        decisions = gr.Markdown()
 
-        refresh = gr.Button(
-            "⟳ REFRESH DASHBOARD",
+        gr.Markdown("## PAPER TRADE HISTORY")
+        trades = gr.Markdown()
+
+        scan_button = gr.Button(
+            "SCAN MARKET NOW",
             variant="primary"
         )
 
-        scan = gr.Button(
-            "SCAN MARKET NOW",
-            variant="secondary"
+        refresh_button = gr.Button(
+            "REFRESH DASHBOARD"
         )
 
-        gr.Markdown("## OPEN POSITIONS")
-
-        positions = gr.Dataframe(
-            headers=[
-                "Symbol",
-                "Entry",
-                "Stop",
-                "Target",
-                "Quantity"
-            ],
+        message = gr.Textbox(
+            label="SYSTEM MESSAGE",
             interactive=False
         )
 
-        gr.Markdown("## RECENT DECISIONS")
-
-        decisions = gr.Dataframe(
-            headers=[
-                "Symbol",
-                "Score",
-                "Action",
-                "Time"
-            ],
-            interactive=False
+        scan_button.click(
+            force_scan,
+            outputs=[
+                message,
+                account,
+                status,
+                positions,
+                decisions,
+                trades
+            ]
         )
 
-        gr.Markdown("## TRADE HISTORY")
-
-        trades = gr.Dataframe(
-            headers=[
-                "Symbol",
-                "Entry",
-                "Exit",
-                "Net P/L",
-                "Reason"
-            ],
-            interactive=False
-        )
-
-        gr.Markdown("## SYSTEM EVENTS")
-
-        events = gr.Dataframe(
-            headers=[
-                "Level",
-                "Message",
-                "Time"
-            ],
-            interactive=False
-        )
-
-        outputs = [
-            status,
-            balance,
-            pnl,
-            open_count,
-            positions,
-            decisions,
-            trades,
-            events
-        ]
-
-        refresh.click(
-            fn=render,
-            outputs=outputs
-        )
-
-        scan.click(
-            fn=force_scan,
-            outputs=outputs
+        refresh_button.click(
+            get_dashboard,
+            outputs=[
+                account,
+                status,
+                positions,
+                decisions,
+                trades
+            ]
         )
 
         demo.load(
-            fn=render,
-            outputs=outputs
+            get_dashboard,
+            outputs=[
+                account,
+                status,
+                positions,
+                decisions,
+                trades
+            ]
         )
 
     return demo
