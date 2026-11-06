@@ -1,3 +1,4 @@
+
 import asyncio
 import inspect
 import logging
@@ -244,10 +245,12 @@ class TradingEngine:
         async with self.lifecycle_lock:
 
             if self.running:
-                logger.warning(
+
+                logger.info(
                     "Trading engine already running"
                 )
-                return
+
+                return True
 
             if self._started_components:
                 raise RuntimeError(
@@ -283,6 +286,8 @@ class TradingEngine:
                     "AI QUANT engine started successfully"
                 )
 
+                return True
+
             except BaseException:
 
                 logger.exception(
@@ -313,6 +318,7 @@ class TradingEngine:
                 )
 
             except asyncio.CancelledError:
+
                 logger.warning(
                     "Component shutdown cancelled: %s",
                     type(component).__name__,
