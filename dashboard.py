@@ -84,22 +84,22 @@ footer {
 # SAFE HELPERS
 # ============================================================
 
-def safe_float(value):
+def safe_float(value, default=0.0):
 
     if isinstance(value, bool):
-        return 0.0
+        return float(default)
 
     try:
 
         result = float(value)
 
-        if not math.isfinite(result):
-            return 0.0
-
-        return result
+        if math.isfinite(result):
+            return result
 
     except (TypeError, ValueError, OverflowError):
-        return 0.0
+        pass
+
+    return float(default)
 
 
 def safe_text(value, limit=500):
@@ -131,14 +131,68 @@ def safe_call(function, default):
         return default
 
 
+def safe_rows(value):
+
+    if not isinstance(value, list):
+        return []
+
+    return [
+        item
+        for item in value
+        if isinstance(item, dict)
+    ]
+
+
 def money(value):
 
     return f"{safe_float(value):,.2f} USDT"
 
 
-def safe_rows(value):
+def get_controller_components(controller):
 
-    return value if isinstance(value, list) else []
+    if controller is None:
+        raise RuntimeError(
+            "Dashboard controller is missing"
+        )
+
+    engine = getattr(
+        controller,
+        "engine",
+        None
+    )
+
+    trader = getattr(
+        controller,
+        "trader",
+        None
+    )
+
+    if engine is None:
+        raise RuntimeError(
+            "Trading engine is missing"
+        )
+
+    if trader is None:
+        raise RuntimeError(
+            "Paper trader is missing"
+        )
+
+    # Support both controller.db and engine.db.
+
+    db = getattr(
+        controller,
+        "db",
+        None
+    )
+
+    if db is None:
+        db = getattr(
+            engine,
+            "db",
+            None
+        )
+
+    return engine, trader, db
 
 
 # ============================================================
@@ -147,9 +201,43 @@ def safe_rows(value):
 
 def get_dashboard(controller):
 
-    trader = controller.trader
-    engine = controller.engine
-    db = controller.db
+    try:
+
+        engine, trader, db = get_controller_components(
+            controller
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Dashboard component initialization failed"
+        )
+
+        return (
+            money(0),
+            money(0),
+            money(0),
+            money(0),
+            money(0),
+            0,
+            "0.00%",
+            "ERROR",
+            "UNKNOWN",
+            "Unavailable",
+            "Dashboard components unavailable",
+            0,
+            0,
+            0,
+            0,
+            [],
+            [],
+            [],
+            [],
+        )
+
+    # --------------------------------------------------------
+    # ACCOUNT SUMMARY
+    # --------------------------------------------------------
 
     summary = safe_call(
         trader.get_summary,
@@ -159,29 +247,57 @@ def get_dashboard(controller):
     if not isinstance(summary, dict):
         summary = {}
 
-    positions_data = summary.get("positions", [])
+    positions_data = summary.get(
+        "positions",
+        []
+    )
 
     if not isinstance(positions_data, list):
         positions_data = []
 
-    decisions = safe_call(
-        lambda: db.get_recent_decisions(15),
-        [],
-    )
+    positions_data = [
+        p for p in positions_data
+        if isinstance(p, dict)
+    ]
 
-    trades = safe_call(
-        lambda: db.get_recent_trades(15),
-        [],
-    )
+    # --------------------------------------------------------
+    # DATABASE DATA
+    # --------------------------------------------------------
 
-    events = safe_call(
-        lambda: db.get_recent_events(20),
-        [],
-    )
+    if db is not None:
+
+        decisions = safe_call(
+            lambda: db.get_recent_decisions(15),
+            [],
+        )
+
+        trades = safe_call(
+            lambda: db.get_recent_trades(15),
+            [],
+        )
+
+        events = safe_call(
+            lambda: db.get_recent_events(20),
+            [],
+        )
+
+    else:
+
+        logger.error(
+            "Dashboard database reference is unavailable"
+        )
+
+        decisions = []
+        trades = []
+        events = []
 
     decisions = safe_rows(decisions)
     trades = safe_rows(trades)
     events = safe_rows(events)
+
+    # --------------------------------------------------------
+    # ENGINE STATUS
+    # --------------------------------------------------------
 
     stats = getattr(
         engine,
@@ -199,19 +315,29 @@ def get_dashboard(controller):
     )
 
     regime = safe_text(
-        getattr(engine, "market_regime", "UNKNOWN"),
+        getattr(
+            engine,
+            "market_regime",
+            "UNKNOWN"
+        ),
         50,
     )
 
     last_scan = safe_text(
-        getattr(engine, "last_scan", None)
-        or "Not scanned yet",
+        getattr(
+            engine,
+            "last_scan",
+            None
+        ) or "Not scanned yet",
         100,
     )
 
     error = safe_text(
-        getattr(engine, "last_error", None)
-        or "No system errors",
+        getattr(
+            engine,
+            "last_error",
+            None
+        ) or "No system errors",
         500,
     )
 
@@ -223,43 +349,54 @@ def get_dashboard(controller):
 
     for position in positions_data:
 
-        if not isinstance(position, dict):
-            continue
+        symbol = safe_text(
+            position.get("symbol", ""),
+            30,
+        )
 
         position_rows.append([
 
-            safe_text(
-                position.get("symbol", ""),
-                30,
-            ),
+            symbol,
 
             round(
-                safe_float(position.get("entry_price")),
+                safe_float(
+                    position.get("entry_price")
+                ),
                 8,
             ),
 
             round(
-                safe_float(position.get("current_price")),
+                safe_float(
+                    position.get("current_price")
+                ),
                 8,
             ),
 
             round(
-                safe_float(position.get("quantity")),
+                safe_float(
+                    position.get("quantity")
+                ),
                 8,
             ),
 
             round(
-                safe_float(position.get("unrealized_pnl")),
+                safe_float(
+                    position.get("unrealized_pnl")
+                ),
                 4,
             ),
 
             round(
-                safe_float(position.get("stop_loss")),
+                safe_float(
+                    position.get("stop_loss")
+                ),
                 8,
             ),
 
             round(
-                safe_float(position.get("take_profit")),
+                safe_float(
+                    position.get("take_profit")
+                ),
                 8,
             ),
 
@@ -273,10 +410,10 @@ def get_dashboard(controller):
 
     for decision in decisions:
 
-        if not isinstance(decision, dict):
-            continue
-
-        reasons = decision.get("reasons", "")
+        reasons = decision.get(
+            "reasons",
+            ""
+        )
 
         if isinstance(reasons, (list, tuple)):
 
@@ -330,9 +467,6 @@ def get_dashboard(controller):
 
     for trade in trades:
 
-        if not isinstance(trade, dict):
-            continue
-
         trade_rows.append([
 
             safe_text(
@@ -341,17 +475,23 @@ def get_dashboard(controller):
             ),
 
             round(
-                safe_float(trade.get("entry_price")),
+                safe_float(
+                    trade.get("entry_price")
+                ),
                 8,
             ),
 
             round(
-                safe_float(trade.get("exit_price")),
+                safe_float(
+                    trade.get("exit_price")
+                ),
                 8,
             ),
 
             round(
-                safe_float(trade.get("net_pnl")),
+                safe_float(
+                    trade.get("net_pnl")
+                ),
                 4,
             ),
 
@@ -374,9 +514,6 @@ def get_dashboard(controller):
     event_rows = []
 
     for event in events:
-
-        if not isinstance(event, dict):
-            continue
 
         event_rows.append([
 
@@ -413,7 +550,7 @@ def get_dashboard(controller):
 
         money(summary.get("reserved")),
 
-        len(positions_data),
+        len(position_rows),
 
         f"{safe_float(summary.get('win_rate')):.2f}%",
 
@@ -450,7 +587,22 @@ def get_dashboard(controller):
 
 async def force_scan(controller):
 
-    engine = controller.engine
+    try:
+
+        engine, trader, db = get_controller_components(
+            controller
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Manual scan initialization failed"
+        )
+
+        return (
+            "Dashboard components unavailable.",
+            *get_dashboard(controller),
+        )
 
     if not getattr(engine, "running", False):
 
@@ -493,12 +645,10 @@ async def force_scan(controller):
                 detail = result.get("message")
 
                 if detail:
-                    message += " " + safe_text(detail, 250)
-
-        logger.info(
-            "Manual scan result: %s",
-            message,
-        )
+                    message += " " + safe_text(
+                        detail,
+                        250
+                    )
 
     except asyncio.CancelledError:
         raise
@@ -525,6 +675,8 @@ async def force_scan(controller):
 # ============================================================
 
 def build_dashboard(controller):
+
+    get_controller_components(controller)
 
     with gr.Blocks(
         css=CSS,
