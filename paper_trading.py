@@ -1,3 +1,4 @@
+
 import math
 import logging
 import threading
@@ -13,7 +14,6 @@ from config import (
     MAX_OPEN_POSITIONS
 )
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -27,11 +27,10 @@ def valid_number(value):
 class PaperTrader:
 
     def __init__(self, db):
-
         self.db = db
         self.lock = threading.RLock()
 
-        account = self.db.get_account()
+        account = self.db.get_account() or {}
 
         self.balance = float(
             account.get("balance", INITIAL_BALANCE)
@@ -41,20 +40,13 @@ class PaperTrader:
             account.get("realized_pnl", 0)
         )
 
-        self.wins = int(account.get("wins", 0))
-        self.losses = int(account.get("losses", 0))
-
-        # أسعار السوق الحية لا تُحفظ في قاعدة البيانات
         self.live_marks = {}
 
     def _get_positions(self):
-
         positions = self.db.get_positions()
-
         return positions if isinstance(positions, list) else []
 
     def _slippage(self):
-
         return SIMULATED_SLIPPAGE_BPS / 10000
 
     def open_position(self, symbol, price, atr):
@@ -125,18 +117,15 @@ class PaperTrader:
                 "symbol": symbol,
                 "quantity": quantity,
                 "entry_price": entry_price,
-                "stop_loss": stop_loss,
-                "take_profit": take_profit,
                 "allocation": allocation,
-                "entry_fee": entry_fee
+                "entry_fee": entry_fee,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit
             }
 
             success = self.db.open_position_atomic(
                 position,
-                new_balance,
-                self.realized_pnl,
-                self.wins,
-                self.losses
+                new_balance
             )
 
             if not success:
@@ -150,7 +139,6 @@ class PaperTrader:
             }
 
             logger.info("Paper position opened: %s", symbol)
-
             return True
 
     def close_position(self, symbol, price, reason=""):
@@ -189,25 +177,19 @@ class PaperTrader:
             exit_fee = exit_value * FEE_RATE
 
             gross_pnl = exit_value - allocation
-
             net_pnl = gross_pnl - entry_fee - exit_fee
 
-            returned_balance = (
-                allocation + gross_pnl - exit_fee
-            )
-
-            new_balance = self.balance + returned_balance
+            new_balance = self.balance + exit_value - exit_fee
             new_realized = self.realized_pnl + net_pnl
 
-            new_wins = self.wins + (1 if net_pnl > 0 else 0)
-            new_losses = self.losses + (1 if net_pnl <= 0 else 0)
-
             trade = {
-                "symbol": symbol,
+                "quantity": quantity,
                 "entry_price": entry_price,
                 "exit_price": exit_price,
-                "quantity": quantity,
+                "gross_pnl": gross_pnl,
                 "net_pnl": net_pnl,
+                "entry_fee": entry_fee,
+                "exit_fee": exit_fee,
                 "reason": str(reason)[:200]
             }
 
@@ -215,9 +197,7 @@ class PaperTrader:
                 symbol,
                 trade,
                 new_balance,
-                new_realized,
-                new_wins,
-                new_losses
+                new_realized
             )
 
             if not success:
@@ -225,13 +205,11 @@ class PaperTrader:
 
             self.balance = new_balance
             self.realized_pnl = new_realized
-            self.wins = new_wins
-            self.losses = new_losses
 
             self.live_marks.pop(symbol, None)
 
             logger.info(
-                "Paper position closed: %s | PnL: %.4f",
+                "Paper position closed: %s | PnL: %.6f",
                 symbol,
                 net_pnl
             )
@@ -282,10 +260,11 @@ class PaperTrader:
                     - current_value * FEE_RATE
                 )
 
-                self.live_marks[symbol] = {
-                    "current_price": price,
-                    "unrealized_pnl": unrealized_pnl
-                }
+                with self.lock:
+                    self.live_marks[symbol] = {
+                        "current_price": price,
+                        "unrealized_pnl": unrealized_pnl
+                    }
 
                 stop_loss = float(position.get("stop_loss", 0))
                 take_profit = float(position.get("take_profit", 0))
@@ -322,20 +301,15 @@ class PaperTrader:
             for position in positions:
 
                 symbol = position.get("symbol")
-
                 mark = self.live_marks.get(symbol)
 
                 if mark:
-
                     position["current_price"] = mark["current_price"]
                     position["unrealized_pnl"] = mark["unrealized_pnl"]
-
                 else:
-
                     position["current_price"] = position.get(
                         "entry_price", 0
                     )
-
                     position["unrealized_pnl"] = 0.0
 
             reserved = sum(
@@ -350,12 +324,18 @@ class PaperTrader:
 
             equity = self.balance + reserved + unrealized_pnl
 
-            total_closed = self.wins + self.losses
+            trades = self.db.get_recent_trades(500)
+
+            wins = sum(
+                1 for trade in trades
+                if float(trade.get("net_pnl", 0)) > 0
+            )
+
+            total = len(trades)
 
             win_rate = (
-                self.wins / total_closed * 100
-                if total_closed
-                else 0.0
+                wins / total * 100
+                if total else 0.0
             )
 
             return {
