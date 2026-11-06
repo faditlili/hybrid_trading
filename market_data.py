@@ -49,18 +49,27 @@ class MarketData:
             or self.retry_attempts < 0
         ):
             raise ValueError(
-                "HTTP_RETRY_ATTEMPTS must be a non-negative integer"
+                "HTTP_RETRY_ATTEMPTS must be non-negative"
             )
 
-        if self.connector_limit <= 0:
+        if (
+            isinstance(self.connector_limit, bool)
+            or not isinstance(self.connector_limit, int)
+            or self.connector_limit <= 0
+        ):
             raise ValueError(
                 "HTTP_MAX_CONNECTIONS must be positive"
             )
 
         self._session_lock = asyncio.Lock()
+        self._closing = False
 
         self.last_success = {}
         self.last_errors = {}
+
+        self._symbol_semaphore = asyncio.Semaphore(
+            min(5, self.connector_limit)
+        )
 
     # ========================================================
     # HELPERS
@@ -97,6 +106,11 @@ class MarketData:
 
         async with self._session_lock:
 
+            if self._closing:
+                raise MarketDataError(
+                    "Market data service is closing"
+                )
+
             if self.session and not self.session.closed:
                 return
 
@@ -114,24 +128,31 @@ class MarketData:
             )
 
             logger.info(
-                "Market data service started."
+                "Market data service started"
             )
 
     async def close(self):
 
         async with self._session_lock:
 
-            if self.session and not self.session.closed:
+            self._closing = True
 
-                await self.session.close()
-
+            session = self.session
             self.session = None
 
+            if session and not session.closed:
+                await session.close()
+
             logger.info(
-                "Market data service closed."
+                "Market data service closed"
             )
 
     async def _ensure_session(self):
+
+        if self._closing:
+            raise MarketDataError(
+                "Market data service is closed"
+            )
 
         if self.session is None or self.session.closed:
             await self.start()
@@ -148,57 +169,38 @@ class MarketData:
 
         await self._ensure_session()
 
-        url = f"{self.base_url}{endpoint}"
-
         last_error = None
 
         for attempt in range(self.retry_attempts + 1):
 
+            await self._ensure_session()
+
             try:
 
                 async with self.session.get(
-                    url,
+                    f"{self.base_url}{endpoint}",
                     params=params,
                 ) as response:
 
                     if response.status == 429:
 
-                        retry_after = response.headers.get(
-                            "Retry-After",
-                            "2",
-                        )
-
-                        try:
-                            delay = min(
-                                max(float(retry_after), 0),
-                                30,
-                            )
-
-                        except (
-                            TypeError,
-                            ValueError,
-                            OverflowError,
-                        ):
-                            delay = 2
-
                         raise MarketDataError(
-                            "Binance rate limit reached. "
-                            f"Retry after {delay} seconds."
+                            "Binance rate limit reached"
                         )
 
                     if response.status == 418:
 
                         raise MarketDataError(
-                            "Binance temporarily blocked this IP."
+                            "Binance temporarily blocked this IP"
                         )
 
                     if response.status >= 500:
 
-                        raise MarketDataError(
+                        last_error = MarketDataError(
                             f"Binance server error: {response.status}"
                         )
 
-                    if response.status != 200:
+                    elif response.status != 200:
 
                         body = await response.text()
 
@@ -206,33 +208,34 @@ class MarketData:
                             f"HTTP {response.status}: {body[:200]}"
                         )
 
-                    data = await response.json(
-                        content_type=None
-                    )
+                    else:
 
-                    if not isinstance(data, (dict, list)):
-
-                        raise MarketDataError(
-                            "Unexpected JSON response from Binance."
+                        data = await response.json(
+                            content_type=None
                         )
 
-                    return data
+                        if not isinstance(data, (dict, list)):
+                            raise MarketDataError(
+                                "Unexpected Binance JSON response"
+                            )
+
+                        return data
 
             except asyncio.CancelledError:
                 raise
 
             except MarketDataError as exc:
 
+                message = str(exc).lower()
+
+                if (
+                    "rate limit" in message
+                    or "blocked this ip" in message
+                    or message.startswith("http 4")
+                ):
+                    raise
+
                 last_error = exc
-
-                if "rate limit" in str(exc).lower():
-                    raise
-
-                if "blocked this IP" in str(exc):
-                    raise
-
-                if attempt >= self.retry_attempts:
-                    break
 
             except (
                 aiohttp.ClientError,
@@ -242,15 +245,14 @@ class MarketData:
 
                 last_error = exc
 
-                if attempt >= self.retry_attempts:
-                    break
+            if attempt < self.retry_attempts:
 
-            delay = min(
-                2 ** attempt,
-                8,
-            )
+                delay = min(
+                    2 ** attempt,
+                    8,
+                )
 
-            await asyncio.sleep(delay)
+                await asyncio.sleep(delay)
 
         raise MarketDataError(
             f"Request failed: {last_error}"
@@ -263,16 +265,12 @@ class MarketData:
     @staticmethod
     def _valid_symbol(symbol):
 
-        if not isinstance(symbol, str):
-            return False
-
-        if not symbol:
-            return False
-
-        if symbol != symbol.upper():
-            return False
-
-        return symbol.isalnum()
+        return (
+            isinstance(symbol, str)
+            and bool(symbol)
+            and symbol == symbol.upper()
+            and symbol.isalnum()
+        )
 
     # ========================================================
     # EXCHANGE TICKER
@@ -281,9 +279,8 @@ class MarketData:
     async def get_ticker(self, symbol):
 
         if not self._valid_symbol(symbol):
-
             raise MarketDataError(
-                "Invalid symbol."
+                "Invalid symbol"
             )
 
         try:
@@ -296,46 +293,34 @@ class MarketData:
             )
 
             if not isinstance(data, dict):
-
                 raise MarketDataError(
-                    "Invalid ticker response format."
+                    "Invalid ticker response"
                 )
 
-            price = float(
-                data["lastPrice"]
-            )
-
-            volume = float(
-                data["quoteVolume"]
-            )
-
-            change_percent = float(
-                data["priceChangePercent"]
-            )
+            price = float(data["lastPrice"])
+            volume = float(data["quoteVolume"])
+            change = float(data["priceChangePercent"])
 
             if not self.valid_number(price) or price <= 0:
-
                 raise MarketDataError(
-                    "Invalid ticker price."
+                    "Invalid ticker price"
                 )
 
             if not self.valid_number(volume) or volume < 0:
-
                 raise MarketDataError(
-                    "Invalid ticker volume."
+                    "Invalid ticker volume"
                 )
 
-            if not self.valid_number(change_percent):
-
+            if not self.valid_number(change):
                 raise MarketDataError(
-                    "Invalid price change percentage."
+                    "Invalid price change"
                 )
 
             result = {
                 "symbol": symbol,
                 "price": price,
                 "quote_volume": volume,
-                "change_percent": change_percent,
+                "change_percent": change,
                 "timestamp": self.utc_timestamp(),
             }
 
@@ -376,23 +361,20 @@ class MarketData:
     ):
 
         if not self._valid_symbol(symbol):
-
             raise MarketDataError(
-                "Invalid symbol."
+                "Invalid symbol"
             )
 
         interval = interval or TIMEFRAME
 
-        limit = (
-            KLINE_LIMIT
-            if limit is None
-            else limit
-        )
+        limit = KLINE_LIMIT if limit is None else limit
 
-        if not isinstance(interval, str) or not interval.strip():
-
+        if (
+            not isinstance(interval, str)
+            or not interval.strip()
+        ):
             raise MarketDataError(
-                "Invalid kline interval."
+                "Invalid kline interval"
             )
 
         if (
@@ -400,9 +382,8 @@ class MarketData:
             or not isinstance(limit, int)
             or not 1 <= limit <= 1000
         ):
-
             raise MarketDataError(
-                "Invalid kline limit."
+                "Invalid kline limit"
             )
 
         try:
@@ -417,9 +398,8 @@ class MarketData:
             )
 
             if not isinstance(raw, list) or not raw:
-
                 raise MarketDataError(
-                    f"No kline data available for {symbol}."
+                    f"No kline data for {symbol}"
                 )
 
             columns = [
@@ -437,24 +417,15 @@ class MarketData:
                 "ignore",
             ]
 
-            rows = []
-
-            for item in raw:
-
-                if not isinstance(item, list):
-                    continue
-
-                if len(item) < 12:
-                    continue
-
-                rows.append(
-                    item[:12]
-                )
+            rows = [
+                item[:12]
+                for item in raw
+                if isinstance(item, list) and len(item) >= 12
+            ]
 
             if not rows:
-
                 raise MarketDataError(
-                    "Kline response has no valid rows."
+                    "Kline response contains no valid rows"
                 )
 
             df = pd.DataFrame(
@@ -472,6 +443,8 @@ class MarketData:
                 "trades",
                 "taker_buy_base",
                 "taker_buy_quote",
+                "open_time",
+                "close_time",
             ]
 
             for column in numeric_columns:
@@ -481,26 +454,8 @@ class MarketData:
                     errors="coerce",
                 )
 
-            df["open_time"] = pd.to_numeric(
-                df["open_time"],
-                errors="coerce",
-            )
-
-            df["close_time"] = pd.to_numeric(
-                df["close_time"],
-                errors="coerce",
-            )
-
             df = df.dropna(
-                subset=[
-                    "open_time",
-                    "close_time",
-                    "open",
-                    "high",
-                    "low",
-                    "close",
-                    "volume",
-                ]
+                subset=numeric_columns
             )
 
             df = df.sort_values(
@@ -517,12 +472,9 @@ class MarketData:
             )
 
             if df.empty:
-
                 raise MarketDataError(
-                    "No valid candles remain after cleaning."
+                    "No valid candles remain"
                 )
-
-            # Validate numeric values.
 
             for column in numeric_columns:
 
@@ -534,12 +486,9 @@ class MarketData:
                     math.isfinite(float(value))
                     for value in values
                 ):
-
                     raise MarketDataError(
-                        f"Non-finite values in {column}."
+                        f"Non-finite values in {column}"
                     )
-
-            # Validate OHLC prices.
 
             price_columns = [
                 "open",
@@ -551,9 +500,8 @@ class MarketData:
             for column in price_columns:
 
                 if (df[column] <= 0).any():
-
                     raise MarketDataError(
-                        f"Invalid price values in {column}."
+                        f"Invalid prices in {column}"
                     )
 
             if (
@@ -563,12 +511,9 @@ class MarketData:
                 or (df["taker_buy_base"] < 0).any()
                 or (df["taker_buy_quote"] < 0).any()
             ):
-
                 raise MarketDataError(
-                    "Volume and trade counts cannot be negative."
+                    "Negative volume or trade count"
                 )
-
-            # Validate candle structure.
 
             invalid_ohlc = (
                 (df["high"] < df["low"])
@@ -579,12 +524,9 @@ class MarketData:
             )
 
             if invalid_ohlc.any():
-
                 raise MarketDataError(
-                    "Invalid OHLC candle structure."
+                    "Invalid OHLC candle structure"
                 )
-
-            # Remove the currently unfinished candle.
 
             now_ms = int(
                 datetime.now(timezone.utc).timestamp() * 1000
@@ -599,9 +541,8 @@ class MarketData:
             )
 
             if len(df) < 60:
-
                 raise MarketDataError(
-                    "Not enough completed candles for analysis."
+                    "Not enough completed candles"
                 )
 
             df["timestamp"] = pd.to_datetime(
@@ -644,46 +585,36 @@ class MarketData:
     async def get_market_snapshot(self, symbol):
 
         if not self._valid_symbol(symbol):
-
             raise MarketDataError(
-                "Invalid symbol."
+                "Invalid symbol"
             )
 
         try:
 
-            ticker_task = self.get_ticker(symbol)
-
-            klines_task = self.get_klines(symbol)
-
             ticker, klines = await asyncio.gather(
-                ticker_task,
-                klines_task,
+                self.get_ticker(symbol),
+                self.get_klines(symbol),
             )
 
-            if not isinstance(klines, pd.DataFrame):
-
+            if (
+                not isinstance(klines, pd.DataFrame)
+                or klines.empty
+            ):
                 raise MarketDataError(
-                    "Invalid candle DataFrame."
-                )
-
-            if klines.empty:
-
-                raise MarketDataError(
-                    f"No candles for {symbol}"
+                    "Invalid candle DataFrame"
                 )
 
             latest_close = float(
                 klines.iloc[-1]["close"]
             )
 
-            if not self.valid_number(latest_close) or latest_close <= 0:
-
+            if (
+                not self.valid_number(latest_close)
+                or latest_close <= 0
+            ):
                 raise MarketDataError(
-                    "Invalid latest candle close."
+                    "Invalid latest candle close"
                 )
-
-            # Both keys are provided for compatibility.
-            # engine.py reads snapshot["klines"].
 
             return {
                 "symbol": symbol,
@@ -707,18 +638,16 @@ class MarketData:
                 raise
 
             raise MarketDataError(
-                f"Could not create market snapshot for {symbol}"
+                f"Could not create snapshot for {symbol}"
             ) from exc
 
     # ========================================================
     # MARKET FILTER
     # ========================================================
 
-    async def get_liquid_symbols(self):
+    async def _check_liquidity(self, symbol):
 
-        results = []
-
-        for symbol in SYMBOLS:
+        async with self._symbol_semaphore:
 
             try:
 
@@ -726,12 +655,11 @@ class MarketData:
                     symbol
                 )
 
-                if (
-                    ticker["quote_volume"]
-                    >= MIN_QUOTE_VOLUME
-                ):
-
-                    results.append(symbol)
+                return (
+                    symbol
+                    if ticker["quote_volume"] >= MIN_QUOTE_VOLUME
+                    else None
+                )
 
             except asyncio.CancelledError:
                 raise
@@ -744,7 +672,28 @@ class MarketData:
                     exc_info=True,
                 )
 
-        return results
+                return None
+
+    async def get_liquid_symbols(self):
+
+        symbols = [
+            symbol
+            for symbol in SYMBOLS
+            if self._valid_symbol(symbol)
+        ]
+
+        results = await asyncio.gather(
+            *[
+                self._check_liquidity(symbol)
+                for symbol in symbols
+            ]
+        )
+
+        return [
+            symbol
+            for symbol in results
+            if symbol is not None
+        ]
 
     # ========================================================
     # SERVICE STATUS
@@ -757,6 +706,7 @@ class MarketData:
             "running": (
                 self.session is not None
                 and not self.session.closed
+                and not self._closing
             ),
             "last_success": dict(
                 self.last_success
