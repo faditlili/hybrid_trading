@@ -1,8 +1,15 @@
-import asyncio
 import math
+import logging
 
 import gradio as gr
 
+
+logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# STYLE
+# ============================================================
 
 CSS = """
 .gradio-container {
@@ -73,8 +80,17 @@ footer {
 """
 
 
+# ============================================================
+# SAFE HELPERS
+# ============================================================
+
 def safe_float(value):
+
+    if isinstance(value, bool):
+        return 0.0
+
     try:
+
         result = float(value)
 
         if not math.isfinite(result):
@@ -86,9 +102,48 @@ def safe_float(value):
         return 0.0
 
 
+def safe_text(value, limit=500):
+
+    if value is None:
+        return ""
+
+    try:
+        return str(value)[:limit]
+
+    except Exception:
+        return ""
+
+
+def safe_call(function, default):
+
+    try:
+
+        result = function()
+
+        return result if result is not None else default
+
+    except Exception:
+
+        logger.exception(
+            "Dashboard data retrieval failed"
+        )
+
+        return default
+
+
 def money(value):
+
     return f"{safe_float(value):,.2f} USDT"
 
+
+def safe_rows(value):
+
+    return value if isinstance(value, list) else []
+
+
+# ============================================================
+# DASHBOARD DATA
+# ============================================================
 
 def get_dashboard(controller):
 
@@ -96,330 +151,518 @@ def get_dashboard(controller):
     engine = controller.engine
     db = controller.db
 
-    summary = trader.get_summary() or {}
+    summary = safe_call(
+        trader.get_summary,
+        {},
+    )
 
-    balance = summary.get("balance", 0)
-    equity = summary.get("equity", 0)
-    realized = summary.get("realized_pnl", 0)
-    unrealized = summary.get("unrealized_pnl", 0)
-    reserved = summary.get("reserved", 0)
+    if not isinstance(summary, dict):
+        summary = {}
 
-    positions = summary.get("positions") or []
+    positions_data = summary.get("positions", [])
 
-    decisions = db.get_recent_decisions(15) or []
-    trades = db.get_recent_trades(15) or []
-    events = db.get_recent_events(20) or []
+    if not isinstance(positions_data, list):
+        positions_data = []
 
-    stats = getattr(engine, "scan_stats", {}) or {}
+    decisions = safe_call(
+        lambda: db.get_recent_decisions(15),
+        [],
+    )
+
+    trades = safe_call(
+        lambda: db.get_recent_trades(15),
+        [],
+    )
+
+    events = safe_call(
+        lambda: db.get_recent_events(20),
+        [],
+    )
+
+    decisions = safe_rows(decisions)
+    trades = safe_rows(trades)
+    events = safe_rows(events)
+
+    stats = getattr(
+        engine,
+        "scan_stats",
+        {},
+    )
+
+    if not isinstance(stats, dict):
+        stats = {}
 
     status = (
         "RUNNING"
-        if engine.running
+        if getattr(engine, "running", False)
         else "STOPPED"
     )
 
-    regime = getattr(
-        engine,
-        "market_regime",
-        "UNKNOWN"
+    regime = safe_text(
+        getattr(engine, "market_regime", "UNKNOWN"),
+        50,
     )
 
-    last_scan = (
+    last_scan = safe_text(
         getattr(engine, "last_scan", None)
-        or "Not scanned yet"
+        or "Not scanned yet",
+        100,
     )
 
-    error = (
+    error = safe_text(
         getattr(engine, "last_error", None)
-        or "No system errors"
+        or "No system errors",
+        500,
     )
+
+    # --------------------------------------------------------
+    # POSITIONS
+    # --------------------------------------------------------
 
     position_rows = []
 
-    for position in positions:
+    for position in positions_data:
+
+        if not isinstance(position, dict):
+            continue
 
         position_rows.append([
-            position.get("symbol", ""),
+
+            safe_text(
+                position.get("symbol", ""),
+                30,
+            ),
 
             round(
                 safe_float(position.get("entry_price")),
-                8
+                8,
             ),
 
             round(
                 safe_float(position.get("current_price")),
-                8
+                8,
             ),
 
             round(
                 safe_float(position.get("quantity")),
-                6
+                8,
             ),
 
             round(
                 safe_float(position.get("unrealized_pnl")),
-                4
+                4,
             ),
 
             round(
                 safe_float(position.get("stop_loss")),
-                8
+                8,
             ),
 
             round(
                 safe_float(position.get("take_profit")),
-                8
-            )
+                8,
+            ),
+
         ])
+
+    # --------------------------------------------------------
+    # DECISIONS
+    # --------------------------------------------------------
 
     decision_rows = []
 
     for decision in decisions:
 
+        if not isinstance(decision, dict):
+            continue
+
         reasons = decision.get("reasons", "")
 
-        if isinstance(reasons, list):
+        if isinstance(reasons, (list, tuple)):
 
             reasons = " | ".join(
-                str(item)
+                safe_text(item, 200)
                 for item in reasons
             )
 
-        elif isinstance(reasons, dict):
+        else:
 
-            reasons = str(reasons)
+            reasons = safe_text(
+                reasons,
+                350,
+            )
 
         decision_rows.append([
-            decision.get("symbol", ""),
-            decision.get("action", ""),
-            safe_float(decision.get("score")),
-            decision.get("ai_vote", ""),
-            str(reasons)[:350],
-            decision.get("timestamp", "")
+
+            safe_text(
+                decision.get("symbol", ""),
+                30,
+            ),
+
+            safe_text(
+                decision.get("action", ""),
+                30,
+            ),
+
+            safe_float(
+                decision.get("score")
+            ),
+
+            safe_text(
+                decision.get("ai_vote", ""),
+                30,
+            ),
+
+            reasons[:350],
+
+            safe_text(
+                decision.get("timestamp", ""),
+                100,
+            ),
+
         ])
+
+    # --------------------------------------------------------
+    # CLOSED TRADES
+    # --------------------------------------------------------
 
     trade_rows = []
 
     for trade in trades:
 
+        if not isinstance(trade, dict):
+            continue
+
         trade_rows.append([
-            trade.get("symbol", ""),
+
+            safe_text(
+                trade.get("symbol", ""),
+                30,
+            ),
 
             round(
                 safe_float(trade.get("entry_price")),
-                8
+                8,
             ),
 
             round(
                 safe_float(trade.get("exit_price")),
-                8
+                8,
             ),
 
             round(
                 safe_float(trade.get("net_pnl")),
-                4
+                4,
             ),
 
-            trade.get("reason", ""),
-            trade.get("timestamp", "")
+            safe_text(
+                trade.get("reason", ""),
+                100,
+            ),
+
+            safe_text(
+                trade.get("timestamp", ""),
+                100,
+            ),
+
         ])
+
+    # --------------------------------------------------------
+    # SYSTEM EVENTS
+    # --------------------------------------------------------
 
     event_rows = []
 
     for event in events:
 
+        if not isinstance(event, dict):
+            continue
+
         event_rows.append([
-            event.get("level", ""),
-            str(event.get("message", ""))[:500],
-            event.get("timestamp", "")
+
+            safe_text(
+                event.get("level", ""),
+                30,
+            ),
+
+            safe_text(
+                event.get("message", ""),
+                500,
+            ),
+
+            safe_text(
+                event.get("timestamp", ""),
+                100,
+            ),
+
         ])
 
-    return (
-        money(balance),
-        money(equity),
-        money(realized),
-        money(unrealized),
-        money(reserved),
+    # --------------------------------------------------------
+    # OUTPUT
+    # --------------------------------------------------------
 
-        len(positions),
+    return (
+
+        money(summary.get("balance")),
+
+        money(summary.get("equity")),
+
+        money(summary.get("realized_pnl")),
+
+        money(summary.get("unrealized_pnl")),
+
+        money(summary.get("reserved")),
+
+        len(positions_data),
 
         f"{safe_float(summary.get('win_rate')):.2f}%",
 
         status,
+
         regime,
+
         last_scan,
+
         error,
 
-        stats.get("scanned", 0),
-        stats.get("approved", 0),
-        stats.get("rejected", 0),
-        stats.get("errors", 0),
+        int(safe_float(stats.get("scanned"))),
+
+        int(safe_float(stats.get("approved"))),
+
+        int(safe_float(stats.get("rejected"))),
+
+        int(safe_float(stats.get("errors"))),
 
         position_rows,
+
         decision_rows,
+
         trade_rows,
-        event_rows
+
+        event_rows,
+
     )
 
+
+# ============================================================
+# MANUAL SCAN
+# ============================================================
 
 async def force_scan(controller):
 
     engine = controller.engine
 
-    if engine.scan_lock.locked():
+    if not getattr(engine, "running", False):
 
         return (
-            "A scan is already running.",
-            *get_dashboard(controller)
+            "Engine is not running.",
+            *get_dashboard(controller),
         )
 
     try:
 
-        await engine.scan_once()
+        result = await engine.scan_once()
 
-        message = "Market scan completed."
+        if not isinstance(result, dict):
+
+            message = "Invalid scan response."
+
+        else:
+
+            status = result.get(
+                "status",
+                "UNKNOWN",
+            )
+
+            messages = {
+                "COMPLETED": "Market scan completed successfully.",
+                "BUSY": "A scan is already running.",
+                "TIMEOUT": "Market scan exceeded its time limit.",
+                "ERROR": "Market scan failed.",
+                "STOPPED": "Engine stopped during the scan.",
+                "NOT_RUNNING": "Engine is not running.",
+            }
+
+            message = messages.get(
+                status,
+                f"Scan status: {safe_text(status, 50)}",
+            )
+
+            if status == "ERROR":
+
+                detail = result.get("message")
+
+                if detail:
+                    message += " " + safe_text(detail, 250)
+
+        logger.info(
+            "Manual scan result: %s",
+            message,
+        )
 
     except asyncio.CancelledError:
-
         raise
 
     except Exception as exc:
 
+        logger.exception(
+            "Manual dashboard scan failed"
+        )
+
         message = (
-            f"Scan failed: {type(exc).__name__}: {str(exc)[:250]}"
+            f"Scan failed: {type(exc).__name__}: "
+            f"{safe_text(exc, 250)}"
         )
 
     return (
         message,
-        *get_dashboard(controller)
+        *get_dashboard(controller),
     )
 
+
+# ============================================================
+# DASHBOARD BUILDER
+# ============================================================
 
 def build_dashboard(controller):
 
     with gr.Blocks(
         css=CSS,
-        title="AI QUANT"
+        title="AI QUANT",
     ) as demo:
 
         gr.Markdown(
             "# AI QUANT",
-            elem_id="main-title"
+            elem_id="main-title",
         )
 
         gr.Markdown(
             "AUTONOMOUS MARKET ANALYSIS | PAPER TRADING",
-            elem_id="subtitle"
+            elem_id="subtitle",
         )
 
         gr.Markdown(
             "SIMULATION MODE ONLY — NO REAL ORDERS",
-            elem_classes=["status-text"]
+            elem_classes=["status-text"],
         )
+
+        # ----------------------------------------------------
+        # ACCOUNT
+        # ----------------------------------------------------
 
         with gr.Row():
 
             balance = gr.Textbox(
                 label="Available Balance",
-                interactive=False
+                interactive=False,
             )
 
             equity = gr.Textbox(
                 label="Total Equity",
-                interactive=False
+                interactive=False,
             )
 
             reserved = gr.Textbox(
                 label="Reserved Capital",
-                interactive=False
+                interactive=False,
             )
 
         with gr.Row():
 
             realized = gr.Textbox(
                 label="Realized PnL",
-                interactive=False
+                interactive=False,
             )
 
             unrealized = gr.Textbox(
                 label="Unrealized PnL",
-                interactive=False
+                interactive=False,
             )
 
             win_rate = gr.Textbox(
                 label="Win Rate",
-                interactive=False
+                interactive=False,
             )
+
+        # ----------------------------------------------------
+        # ENGINE STATUS
+        # ----------------------------------------------------
 
         with gr.Row():
 
             open_count = gr.Number(
                 label="Open Positions",
-                interactive=False
+                interactive=False,
             )
 
             status = gr.Textbox(
                 label="Engine Status",
-                interactive=False
+                interactive=False,
             )
 
             regime = gr.Textbox(
                 label="BTC Market Regime",
-                interactive=False
+                interactive=False,
             )
 
-        with gr.Row():
-
-            last_scan = gr.Textbox(
-                label="Last Scan",
-                interactive=False
-            )
+        last_scan = gr.Textbox(
+            label="Last Scan",
+            interactive=False,
+        )
 
         with gr.Row():
 
             scanned = gr.Number(
                 label="Scanned",
-                interactive=False
+                interactive=False,
             )
 
             approved = gr.Number(
                 label="Approved",
-                interactive=False
+                interactive=False,
             )
 
             rejected = gr.Number(
                 label="Rejected",
-                interactive=False
+                interactive=False,
             )
 
             errors = gr.Number(
                 label="Errors",
-                interactive=False
+                interactive=False,
             )
 
         system_error = gr.Textbox(
             label="System Diagnostics",
-            interactive=False
+            interactive=False,
         )
+
+        # ----------------------------------------------------
+        # MARKET CONTROL
+        # ----------------------------------------------------
 
         gr.Markdown(
             "## MARKET CONTROL",
-            elem_classes=["section-title"]
+            elem_classes=["section-title"],
         )
 
         scan_button = gr.Button(
             "SCAN MARKET NOW",
-            variant="primary"
+            variant="primary",
         )
 
         scan_message = gr.Textbox(
             label="Scan Result",
-            interactive=False
+            interactive=False,
         )
+
+        # ----------------------------------------------------
+        # OPEN POSITIONS
+        # ----------------------------------------------------
 
         gr.Markdown(
             "## OPEN PAPER POSITIONS",
-            elem_classes=["section-title"]
+            elem_classes=["section-title"],
         )
 
         positions = gr.Dataframe(
@@ -430,7 +673,7 @@ def build_dashboard(controller):
                 "Quantity",
                 "Unrealized PnL",
                 "Stop Loss",
-                "Take Profit"
+                "Take Profit",
             ],
             datatype=[
                 "str",
@@ -439,14 +682,18 @@ def build_dashboard(controller):
                 "number",
                 "number",
                 "number",
-                "number"
+                "number",
             ],
-            interactive=False
+            interactive=False,
         )
+
+        # ----------------------------------------------------
+        # AI DECISIONS
+        # ----------------------------------------------------
 
         gr.Markdown(
             "## AI DECISION HISTORY",
-            elem_classes=["section-title"]
+            elem_classes=["section-title"],
         )
 
         decisions = gr.Dataframe(
@@ -456,7 +703,7 @@ def build_dashboard(controller):
                 "Score",
                 "AI Vote",
                 "Reasons",
-                "Timestamp"
+                "Timestamp",
             ],
             datatype=[
                 "str",
@@ -464,14 +711,18 @@ def build_dashboard(controller):
                 "number",
                 "str",
                 "str",
-                "str"
+                "str",
             ],
-            interactive=False
+            interactive=False,
         )
+
+        # ----------------------------------------------------
+        # CLOSED TRADES
+        # ----------------------------------------------------
 
         gr.Markdown(
             "## CLOSED PAPER TRADES",
-            elem_classes=["section-title"]
+            elem_classes=["section-title"],
         )
 
         trades = gr.Dataframe(
@@ -481,7 +732,7 @@ def build_dashboard(controller):
                 "Exit",
                 "Net PnL",
                 "Reason",
-                "Timestamp"
+                "Timestamp",
             ],
             datatype=[
                 "str",
@@ -489,85 +740,123 @@ def build_dashboard(controller):
                 "number",
                 "number",
                 "str",
-                "str"
+                "str",
             ],
-            interactive=False
+            interactive=False,
         )
+
+        # ----------------------------------------------------
+        # EVENTS
+        # ----------------------------------------------------
 
         gr.Markdown(
             "## SYSTEM EVENTS",
-            elem_classes=["section-title"]
+            elem_classes=["section-title"],
         )
 
         events = gr.Dataframe(
             headers=[
                 "Level",
                 "Message",
-                "Timestamp"
+                "Timestamp",
             ],
             datatype=[
                 "str",
                 "str",
-                "str"
+                "str",
             ],
-            interactive=False
+            interactive=False,
         )
 
         refresh_button = gr.Button(
-            "REFRESH DASHBOARD"
+            "REFRESH DASHBOARD",
         )
 
+        # ----------------------------------------------------
+        # OUTPUTS
+        # ----------------------------------------------------
+
         outputs = [
+
             balance,
             equity,
             realized,
             unrealized,
             reserved,
+
             open_count,
             win_rate,
+
             status,
             regime,
             last_scan,
             system_error,
+
             scanned,
             approved,
             rejected,
             errors,
+
             positions,
             decisions,
             trades,
-            events
+            events,
+
         ]
+
+        # ----------------------------------------------------
+        # REFRESH
+        # ----------------------------------------------------
 
         refresh_button.click(
             fn=lambda: get_dashboard(controller),
-            outputs=outputs
+            inputs=None,
+            outputs=outputs,
         )
+
+        # ----------------------------------------------------
+        # MANUAL SCAN
+        # ----------------------------------------------------
 
         scan_button.click(
             fn=lambda: force_scan(controller),
+            inputs=None,
             outputs=[
                 scan_message,
-                *outputs
-            ]
+                *outputs,
+            ],
         )
 
+        # ----------------------------------------------------
+        # AUTOMATIC REFRESH
+        # ----------------------------------------------------
+
         timer = gr.Timer(
-            value=15
+            value=15,
         )
 
         timer.tick(
             fn=lambda: get_dashboard(controller),
-            outputs=outputs
+            inputs=None,
+            outputs=outputs,
         )
+
+        # ----------------------------------------------------
+        # INITIAL LOAD
+        # ----------------------------------------------------
 
         demo.load(
             fn=lambda: get_dashboard(controller),
-            outputs=outputs
+            inputs=None,
+            outputs=outputs,
         )
 
     return demo
 
+
+# ============================================================
+# PUBLIC API
+# ============================================================
 
 def create_dashboard(controller):
 
