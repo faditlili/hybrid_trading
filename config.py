@@ -34,12 +34,12 @@ DB_PATH = os.getenv("DB_PATH", "ai_quant.db").strip()
 
 
 # ============================================================
-# MARKET DATA
+# MARKET DATA - BINGX
 # ============================================================
 
-BINANCE_BASE_URL = os.getenv(
-    "BINANCE_BASE_URL",
-    "https://api.binance.com",
+BINGX_BASE_URL = os.getenv(
+    "BINGX_BASE_URL",
+    "https://open-api.bingx.com",
 ).strip().rstrip("/")
 
 TIMEFRAME = os.getenv("TIMEFRAME", "15m").strip()
@@ -49,13 +49,12 @@ KLINE_LIMIT = 200
 MIN_QUOTE_VOLUME = 5_000_000.0
 
 SYMBOLS = [
-    "BTCUSDT",
-    "ETHUSDT",
-    "BNBUSDT",
-    "SOLUSDT",
-    "XRPUSDT",
+    "BTC-USDT",
+    "ETH-USDT",
+    "BNB-USDT",
+    "SOL-USDT",
+    "XRP-USDT",
 ]
-
 
 # ============================================================
 # ENGINE
