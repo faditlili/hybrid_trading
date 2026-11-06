@@ -1,3 +1,4 @@
+
 import asyncio
 import logging
 from datetime import datetime, timezone
@@ -20,10 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 def utc_timestamp():
-
-    return datetime.now(
-        timezone.utc
-    ).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 class TradingEngine:
@@ -53,6 +51,7 @@ class TradingEngine:
         self.scan_lock = asyncio.Lock()
 
         self.last_decisions = []
+
         self.scan_stats = {
             "scanned": 0,
             "rejected": 0,
@@ -78,9 +77,20 @@ class TradingEngine:
 
         self.running = False
 
-        await self.news.close()
-        await self.ai.close()
-        await self.market.close()
+        for component in (
+            self.news,
+            self.ai,
+            self.market
+        ):
+
+            try:
+                await component.close()
+
+            except Exception:
+
+                logger.exception(
+                    "Component shutdown failed"
+                )
 
         logger.info("AI QUANT engine stopped")
 
@@ -93,7 +103,6 @@ class TradingEngine:
             )
 
             if not isinstance(snapshot, dict):
-
                 return "UNKNOWN"
 
             candles = snapshot.get("klines")
@@ -102,8 +111,20 @@ class TradingEngine:
                 candles
             )
 
-            if not indicators:
+            if not isinstance(indicators, dict):
+                return "UNKNOWN"
 
+            required = (
+                "ema9",
+                "ema21",
+                "ema50",
+                "price"
+            )
+
+            if any(
+                key not in indicators
+                for key in required
+            ):
                 return "UNKNOWN"
 
             bullish = (
@@ -199,48 +220,27 @@ class TradingEngine:
                     self.market
                 )
 
-                # Analyze Bitcoin market regime
+                # Analyze BTC without stopping the scanner
                 self.market_regime = (
                     await self.get_market_regime()
                 )
 
-                if self.market_regime != "BULLISH":
-
-                    reason = (
-                        "BTC market regime: "
-                        + self.market_regime
-                    )
-
-                    logger.info(reason)
-
-                    for symbol in SYMBOLS:
-
-                        self.record_decision(
-                            symbol,
-                            "WAIT",
-                            0,
-                            "UNAVAILABLE",
-                            [reason]
-                        )
-
-                        stats["rejected"] += 1
-
-                    self.scan_stats = stats
-
-                    return {
-                        "status": "COMPLETED",
-                        "regime": self.market_regime,
-                        "stats": stats
-                    }
+                logger.info(
+                    "BTC market regime: %s",
+                    self.market_regime
+                )
 
                 # Collect recent news
                 news_items = []
 
                 try:
 
-                    news_items = await self.news.get_news(
+                    result = await self.news.get_news(
                         limit=10
                     )
+
+                    if isinstance(result, list):
+                        news_items = result
 
                 except Exception:
 
@@ -249,17 +249,24 @@ class TradingEngine:
                         exc_info=True
                     )
 
-                news_context = [
-                    {
-                        "title": item.get("title", ""),
-                        "description": item.get(
-                            "description",
-                            ""
-                        )
-                    }
-                    for item in news_items
-                ]
+                news_context = []
 
+                for item in news_items:
+
+                    if not isinstance(item, dict):
+                        continue
+
+                    news_context.append({
+                        "title": str(
+                            item.get("title", "")
+                        )[:300],
+
+                        "description": str(
+                            item.get("description", "")
+                        )[:600]
+                    })
+
+                # Scan every configured symbol
                 for symbol in SYMBOLS:
 
                     stats["scanned"] += 1
@@ -285,15 +292,13 @@ class TradingEngine:
                             stats["rejected"] += 1
                             continue
 
-                        candles = snapshot.get(
-                            "klines"
-                        )
+                        candles = snapshot.get("klines")
 
                         indicators = calculate_indicators(
                             candles
                         )
 
-                        if not indicators:
+                        if not isinstance(indicators, dict):
 
                             self.record_decision(
                                 symbol,
@@ -306,11 +311,10 @@ class TradingEngine:
                             stats["rejected"] += 1
                             continue
 
-                        technical = (
-                            calculate_technical_score(
-                                indicators,
-                                self.market_regime
-                            )
+                        # Technical evaluation
+                        technical = calculate_technical_score(
+                            indicators,
+                            self.market_regime
                         )
 
                         if not technical.get("valid"):
@@ -331,7 +335,7 @@ class TradingEngine:
 
                         technical_score = technical["score"]
 
-                        # Do not call AI for weak technical setups
+                        # Avoid unnecessary AI requests
                         if (
                             technical_score + 15
                             < MIN_SCORE_TO_ENTER
@@ -342,8 +346,7 @@ class TradingEngine:
                                 "WAIT",
                                 technical_score,
                                 "NOT_CHECKED",
-                                technical["reasons"]
-                                + [
+                                technical["reasons"] + [
                                     "Technical score below entry threshold"
                                 ]
                             )
@@ -351,6 +354,7 @@ class TradingEngine:
                             stats["rejected"] += 1
                             continue
 
+                        # Prepare AI context
                         ai_context = {
                             "symbol": symbol,
                             "market_regime": self.market_regime,
@@ -363,6 +367,7 @@ class TradingEngine:
                             ai_context
                         )
 
+                        # Final decision
                         decision = evaluate_setup(
                             indicators,
                             self.market_regime,
@@ -374,12 +379,10 @@ class TradingEngine:
 
                         if action == "PAPER_BUY":
 
-                            opened = (
-                                self.trader.open_position(
-                                    symbol,
-                                    indicators["price"],
-                                    indicators["atr"]
-                                )
+                            opened = self.trader.open_position(
+                                symbol,
+                                indicators["price"],
+                                indicators["atr"]
                             )
 
                             if opened:
