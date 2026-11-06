@@ -1,3 +1,4 @@
+
 import asyncio
 import json
 import logging
@@ -27,9 +28,17 @@ class AICouncil:
 
         self.single_model_min_score = 80
 
+        self.max_concurrent_requests = 5
+        self.request_semaphore = asyncio.Semaphore(
+            self.max_concurrent_requests
+        )
+
+        self.max_context_length = 8000
+
     async def start(self):
 
         if self.session and not self.session.closed:
+            self.available = True
             return
 
         if not HF_TOKEN:
@@ -41,35 +50,49 @@ class AICouncil:
             self.available = False
             return
 
-        timeout = aiohttp.ClientTimeout(
-            total=HF_TIMEOUT
-        )
+        try:
 
-        connector = aiohttp.TCPConnector(
-            limit=10,
-            ttl_dns_cache=300
-        )
+            timeout = aiohttp.ClientTimeout(
+                total=HF_TIMEOUT
+            )
 
-        self.session = aiohttp.ClientSession(
-            timeout=timeout,
-            connector=connector,
-            headers={
-                "Authorization": f"Bearer {HF_TOKEN}",
-                "Content-Type": "application/json"
-            }
-        )
+            connector = aiohttp.TCPConnector(
+                limit=10,
+                ttl_dns_cache=300
+            )
 
-        self.available = True
+            self.session = aiohttp.ClientSession(
+                timeout=timeout,
+                connector=connector,
+                headers={
+                    "Authorization": f"Bearer {HF_TOKEN}",
+                    "Content-Type": "application/json"
+                }
+            )
 
-        logger.info("AI Council started")
+            self.available = True
+
+            logger.info("AI Council started")
+
+        except Exception:
+
+            logger.exception(
+                "Failed to initialize AI Council"
+            )
+
+            self.session = None
+            self.available = False
 
     async def close(self):
 
         if self.session and not self.session.closed:
+
             await self.session.close()
 
         self.session = None
         self.available = False
+
+        logger.info("AI Council stopped")
 
     @staticmethod
     def extract_vote(response):
@@ -79,7 +102,8 @@ class AICouncil:
 
         text = response.strip().upper()
 
-        # Remove common Markdown formatting.
+        text = text.replace("\ufeff", "")
+
         text = re.sub(
             r"^```(?:TEXT)?\s*|\s*```$",
             "",
@@ -87,7 +111,6 @@ class AICouncil:
             flags=re.IGNORECASE
         ).strip()
 
-        # Accept only a clear, standalone vote.
         match = re.fullmatch(
             r"(?:VOTE\s*:\s*)?(BUY|SELL|HOLD)[.!]?",
             text
@@ -105,14 +128,15 @@ class AICouncil:
             market_data = json.dumps(
                 context,
                 ensure_ascii=False,
+                allow_nan=False,
                 default=str
             )
 
         except (TypeError, ValueError):
 
-            market_data = str(context)
+            market_data = "{}"
 
-        market_data = market_data[:6000]
+        market_data = market_data[:self.max_context_length]
 
         return f"""
 You are an analytical assistant
@@ -157,6 +181,61 @@ Market information:
 {market_data}
 """
 
+    @staticmethod
+    def extract_content(data):
+
+        if not isinstance(data, dict):
+            return None
+
+        choices = data.get("choices")
+
+        if not isinstance(choices, list) or not choices:
+            return None
+
+        choice = choices[0]
+
+        if not isinstance(choice, dict):
+            return None
+
+        message = choice.get("message")
+
+        if not isinstance(message, dict):
+            return None
+
+        content = message.get("content")
+
+        if isinstance(content, str):
+            return content
+
+        if isinstance(content, list):
+
+            parts = []
+
+            for item in content:
+
+                if isinstance(item, str):
+                    parts.append(item)
+
+                elif isinstance(item, dict):
+
+                    value = item.get("text")
+
+                    if isinstance(value, str):
+                        parts.append(value)
+
+            return " ".join(parts)
+
+        return None
+
+    @staticmethod
+    def unavailable_result(model, reason):
+
+        return {
+            "model": model,
+            "vote": "UNAVAILABLE",
+            "reason": reason
+        }
+
     async def ask_model(self, model, context):
 
         if (
@@ -164,11 +243,10 @@ Market information:
             or self.session.closed
         ):
 
-            return {
-                "model": model,
-                "vote": "UNAVAILABLE",
-                "reason": "AI session unavailable"
-            }
+            return self.unavailable_result(
+                model,
+                "AI session unavailable"
+            )
 
         prompt = self.build_prompt(context)
 
@@ -199,126 +277,116 @@ Market information:
 
         try:
 
-            async with self.session.post(
-                HF_API_URL,
-                json=payload
-            ) as response:
+            async with self.request_semaphore:
 
-                if response.status != 200:
+                async with self.session.post(
+                    HF_API_URL,
+                    json=payload
+                ) as response:
 
-                    error_text = await response.text()
+                    if response.status != 200:
 
-                    logger.warning(
-                        "Model %s HTTP %s",
-                        model,
-                        response.status
+                        logger.warning(
+                            "Model %s returned HTTP %s",
+                            model,
+                            response.status
+                        )
+
+                        return self.unavailable_result(
+                            model,
+                            f"HTTP error {response.status}"
+                        )
+
+                    data = await response.json(
+                        content_type=None
                     )
 
-                    return {
-                        "model": model,
-                        "vote": "UNAVAILABLE",
-                        "reason": (
-                            f"HTTP {response.status}: "
-                            f"{error_text[:120]}"
-                        )
-                    }
+            if not isinstance(data, dict):
 
-                data = await response.json()
-
-                if not isinstance(data, dict):
-
-                    return {
-                        "model": model,
-                        "vote": "UNAVAILABLE",
-                        "reason": "Invalid API response"
-                    }
-
-                choices = data.get("choices", [])
-
-                if not isinstance(choices, list) or not choices:
-
-                    return {
-                        "model": model,
-                        "vote": "UNAVAILABLE",
-                        "reason": "Empty model response"
-                    }
-
-                message = choices[0].get(
-                    "message",
-                    {}
+                return self.unavailable_result(
+                    model,
+                    "Invalid API response"
                 )
 
-                if not isinstance(message, dict):
+            content = self.extract_content(data)
 
-                    return {
-                        "model": model,
-                        "vote": "UNAVAILABLE",
-                        "reason": "Invalid message format"
-                    }
+            if content is None:
 
-                content = message.get("content", "")
+                return self.unavailable_result(
+                    model,
+                    "Missing model response content"
+                )
 
-                if isinstance(content, list):
+            vote = self.extract_vote(content)
 
-                    parts = []
+            if vote == "INVALID":
 
-                    for item in content:
-
-                        if isinstance(item, dict):
-
-                            parts.append(
-                                str(item.get("text", ""))
-                            )
-
-                        elif isinstance(item, str):
-
-                            parts.append(item)
-
-                    content = " ".join(parts)
-
-                vote = self.extract_vote(content)
-
-                if vote == "INVALID":
-
-                    return {
-                        "model": model,
-                        "vote": "INVALID",
-                        "reason": "Unrecognized voting format"
-                    }
+                logger.warning(
+                    "Model %s returned an invalid vote",
+                    model
+                )
 
                 return {
                     "model": model,
-                    "vote": vote,
-                    "reason": "Valid model response"
+                    "vote": "INVALID",
+                    "reason": "Unrecognized voting format"
                 }
+
+            return {
+                "model": model,
+                "vote": vote,
+                "reason": "Valid model response"
+            }
 
         except asyncio.TimeoutError:
 
-            return {
-                "model": model,
-                "vote": "UNAVAILABLE",
-                "reason": "Request timeout"
-            }
+            return self.unavailable_result(
+                model,
+                "Request timeout"
+            )
+
+        except aiohttp.ClientError as error:
+
+            logger.warning(
+                "Network error for model %s: %s",
+                model,
+                type(error).__name__
+            )
+
+            return self.unavailable_result(
+                model,
+                "Network error"
+            )
 
         except (
-            aiohttp.ClientError,
             ValueError,
+            TypeError,
             KeyError,
-            IndexError,
-            TypeError
+            IndexError
         ) as error:
 
             logger.warning(
-                "AI request failed for %s: %s",
+                "Invalid response from %s: %s",
                 model,
-                error
+                type(error).__name__
             )
 
-            return {
-                "model": model,
-                "vote": "UNAVAILABLE",
-                "reason": str(error)[:150]
-            }
+            return self.unavailable_result(
+                model,
+                "Invalid model response"
+            )
+
+        except Exception:
+
+            logger.exception(
+                "Unexpected AI error for model %s",
+                model
+            )
+
+            return self.unavailable_result(
+                model,
+                "Unexpected AI error"
+            )
 
     @staticmethod
     def valid_score(context):
@@ -348,6 +416,21 @@ Market information:
 
             return 0
 
+    @staticmethod
+    def empty_result(reason):
+
+        return {
+            "vote": "UNAVAILABLE",
+            "reason": reason,
+            "votes": {
+                "BUY": 0,
+                "SELL": 0,
+                "HOLD": 0
+            },
+            "available_models": 0,
+            "details": []
+        }
+
     async def analyze(self, context):
 
         if (
@@ -355,23 +438,23 @@ Market information:
             or self.session.closed
         ):
 
-            return {
-                "vote": "UNAVAILABLE",
-                "reason": "AI session not initialized",
-                "votes": {},
-                "available_models": 0,
-                "details": []
-            }
+            self.available = False
+
+            return self.empty_result(
+                "AI session not initialized"
+            )
 
         if not isinstance(context, dict):
 
-            return {
-                "vote": "UNAVAILABLE",
-                "reason": "Invalid analysis context",
-                "votes": {},
-                "available_models": 0,
-                "details": []
-            }
+            return self.empty_result(
+                "Invalid analysis context"
+            )
+
+        if not isinstance(HF_MODELS, (list, tuple)):
+
+            return self.empty_result(
+                "Invalid AI models configuration"
+            )
 
         models = list(dict.fromkeys(
             model.strip()
@@ -381,13 +464,9 @@ Market information:
 
         if not models:
 
-            return {
-                "vote": "UNAVAILABLE",
-                "reason": "No AI models configured",
-                "votes": {},
-                "available_models": 0,
-                "details": []
-            }
+            return self.empty_result(
+                "No AI models configured"
+            )
 
         tasks = [
             self.ask_model(model, context)
@@ -406,16 +485,15 @@ Market information:
         }
 
         details = []
-        available_models = 0
 
-        for result in results:
+        for index, result in enumerate(results):
 
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
 
                 details.append({
-                    "model": "UNKNOWN",
+                    "model": models[index],
                     "vote": "UNAVAILABLE",
-                    "reason": str(result)[:150]
+                    "reason": "Unexpected task failure"
                 })
 
                 continue
@@ -425,32 +503,34 @@ Market information:
             vote = result.get("vote")
 
             if vote in votes:
-
                 votes[vote] += 1
-                available_models += 1
 
         self.model_status = details
+
+        available_models = sum(votes.values())
 
         technical_score = self.valid_score(context)
 
         final_vote = "UNAVAILABLE"
         reason = "Insufficient AI agreement"
 
-        # Two or more valid model votes.
+        # Require a strict majority of valid votes.
 
         if available_models >= 2:
 
-            if votes["BUY"] >= 2:
+            majority = available_models / 2
+
+            if votes["BUY"] > majority:
 
                 final_vote = "BUY"
                 reason = "AI majority approved"
 
-            elif votes["SELL"] >= 2:
+            elif votes["SELL"] > majority:
 
                 final_vote = "SELL"
                 reason = "AI majority rejected"
 
-            elif votes["HOLD"] >= 2:
+            elif votes["HOLD"] > majority:
 
                 final_vote = "HOLD"
                 reason = "AI majority recommends waiting"
@@ -460,7 +540,7 @@ Market information:
                 final_vote = "UNAVAILABLE"
                 reason = "AI models disagree"
 
-        # Single-model fallback.
+        # Conservative single-model fallback.
 
         elif available_models == 1:
 
@@ -479,17 +559,18 @@ Market information:
             elif votes["SELL"] == 1:
 
                 final_vote = "SELL"
-                reason = "Available AI model rejected setup"
+
+                reason = (
+                    "Available AI model rejected setup"
+                )
 
             elif votes["HOLD"] == 1:
 
                 final_vote = "HOLD"
-                reason = "Available AI model recommends waiting"
 
-            else:
-
-                final_vote = "UNAVAILABLE"
-                reason = "Single AI approval insufficient"
+                reason = (
+                    "Available AI model recommends waiting"
+                )
 
         result = {
             "vote": final_vote,
