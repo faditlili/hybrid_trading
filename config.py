@@ -295,7 +295,7 @@ def validate_config():
                         f"Invalid trading symbol: {symbol!r}"
                     )
                     
-        # BINGX SYMBOL MAP
+    # BINGX SYMBOL MAP
     if not isinstance(BINGX_SYMBOL_MAP,dict): 
         errors.append("BINGX_SYMBOL_MAP must be a dictionary.")
     elif isinstance(SYMBOLS, list):
