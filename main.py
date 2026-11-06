@@ -49,17 +49,18 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 if PAPER_MODE is not True:
-
     raise RuntimeError(
         "AI QUANT must run in PAPER_MODE=True"
     )
 
 
 if not isinstance(HOST, str) or not HOST.strip():
-
     raise ValueError(
         "HOST must be a non-empty string"
     )
+
+
+SERVER_HOST = HOST.strip()
 
 
 def get_server_port():
@@ -69,7 +70,6 @@ def get_server_port():
         or not isinstance(PORT, int)
         or not 1 <= PORT <= 65535
     ):
-
         raise ValueError(
             "PORT must be an integer between 1 and 65535"
         )
@@ -124,6 +124,10 @@ shutdown_started = False
 
 application_started_once = False
 
+startup_completed = False
+
+application_state = "CREATED"
+
 
 # ============================================================
 # SAFE HELPERS
@@ -135,17 +139,19 @@ def safe_count(value):
         return 0
 
     try:
-
         result = int(value)
 
         return max(0, result)
 
     except (TypeError, ValueError, OverflowError):
-
         return 0
 
 
-def safe_status_text(value, default="UNKNOWN"):
+def safe_status_text(
+    value,
+    default="UNKNOWN",
+    limit=200,
+):
 
     if value is None:
         return default
@@ -154,11 +160,21 @@ def safe_status_text(value, default="UNKNOWN"):
 
         result = str(value).strip()
 
-        return result[:200] if result else default
+        return result[:limit] if result else default
 
     except Exception:
-
         return default
+
+
+def scanner_is_active():
+
+    task = scanner_task
+
+    return (
+        task is not None
+        and not task.done()
+        and not task.cancelled()
+    )
 
 
 # ============================================================
@@ -197,31 +213,85 @@ async def stop_scanner():
 
 
 # ============================================================
+# SAFE COMPONENT SHUTDOWN
+# ============================================================
+
+async def shutdown_component(
+    name,
+    close_function,
+):
+
+    try:
+
+        result = close_function()
+
+        if asyncio.iscoroutine(result):
+            await result
+
+        logger.info(
+            "%s shutdown completed",
+            name,
+        )
+
+    except asyncio.CancelledError:
+
+        raise
+
+    except Exception:
+
+        logger.exception(
+            "%s shutdown failed",
+            name,
+        )
+
+
+# ============================================================
 # APPLICATION SHUTDOWN
 # ============================================================
 
 async def shutdown_components():
 
     global shutdown_started
+    global application_state
 
     if shutdown_started:
         return
 
     shutdown_started = True
 
+    application_state = "STOPPING"
+
     logger.info(
         "Application shutdown started"
     )
 
-    # Prevent new scans.
+    # --------------------------------------------------------
+    # STOP NEW SCANS
+    # --------------------------------------------------------
 
-    engine.running = False
+    try:
 
-    # Stop background scanner.
+        engine.running = False
+
+    except Exception:
+
+        logger.exception(
+            "Could not stop engine flag"
+        )
+
+    # --------------------------------------------------------
+    # STOP SCANNER
+    # --------------------------------------------------------
 
     try:
 
         await stop_scanner()
+
+    except asyncio.CancelledError:
+
+        logger.warning(
+            "Scanner shutdown was cancelled"
+        )
 
     except Exception:
 
@@ -229,41 +299,43 @@ async def shutdown_components():
             "Scanner shutdown failed"
         )
 
-    # Stop Telegram.
+    # --------------------------------------------------------
+    # STOP TELEGRAM
+    # --------------------------------------------------------
 
-    try:
+    await shutdown_component(
+        "Telegram",
+        telegram.close,
+    )
 
-        await telegram.close()
+    # --------------------------------------------------------
+    # CLOSE ENGINE AND DEPENDENCIES
+    # --------------------------------------------------------
 
-    except Exception:
+    await shutdown_component(
+        "Trading engine",
+        engine.close,
+    )
 
-        logger.exception(
-            "Telegram shutdown failed"
-        )
-
-    # Close engine dependencies.
-
-    try:
-
-        await engine.close()
-
-    except Exception:
-
-        logger.exception(
-            "Engine shutdown failed"
-        )
-
-    # Close database last.
+    # --------------------------------------------------------
+    # CLOSE DATABASE LAST
+    # --------------------------------------------------------
 
     try:
 
         db.close()
+
+        logger.info(
+            "Database shutdown completed"
+        )
 
     except Exception:
 
         logger.exception(
             "Database shutdown failed"
         )
+
+    application_state = "STOPPED"
 
     logger.info(
         "Application shutdown completed"
@@ -280,6 +352,8 @@ async def lifespan(app: FastAPI):
     global scanner_task
     global shutdown_started
     global application_started_once
+    global startup_completed
+    global application_state
 
     if application_started_once:
 
@@ -292,6 +366,10 @@ async def lifespan(app: FastAPI):
 
     shutdown_started = False
 
+    startup_completed = False
+
+    application_state = "STARTING"
+
     logger.info(
         "Starting %s version %s",
         APP_NAME,
@@ -300,18 +378,30 @@ async def lifespan(app: FastAPI):
 
     try:
 
-        # Start market, AI and news services.
+        # ----------------------------------------------------
+        # START ENGINE AND DEPENDENCIES
+        # ----------------------------------------------------
 
         await engine.start()
 
-        # Start background scanner.
+        if not getattr(engine, "running", False):
+
+            raise RuntimeError(
+                "Trading engine did not enter running state"
+            )
+
+        # ----------------------------------------------------
+        # START BACKGROUND SCANNER
+        # ----------------------------------------------------
 
         scanner_task = asyncio.create_task(
             engine.run_forever(),
             name="AI_QUANT_SCANNER",
         )
 
-        # Telegram is optional.
+        # ----------------------------------------------------
+        # START TELEGRAM (OPTIONAL)
+        # ----------------------------------------------------
 
         try:
 
@@ -321,11 +411,23 @@ async def lifespan(app: FastAPI):
                 "Telegram startup sequence completed"
             )
 
+        except asyncio.CancelledError:
+
+            raise
+
         except Exception:
 
             logger.exception(
                 "Telegram startup failed; application will continue"
             )
+
+        # ----------------------------------------------------
+        # STARTUP COMPLETE
+        # ----------------------------------------------------
+
+        startup_completed = True
+
+        application_state = "RUNNING"
 
         logger.info(
             "Application startup completed"
@@ -334,6 +436,8 @@ async def lifespan(app: FastAPI):
         yield
 
     except BaseException:
+
+        application_state = "FAILED"
 
         logger.exception(
             "Application lifecycle interrupted"
@@ -364,13 +468,6 @@ api_app = FastAPI(
 @api_app.get("/health")
 async def health():
 
-    task = scanner_task
-
-    scanner_active = (
-        task is not None
-        and not task.done()
-    )
-
     engine_running = bool(
         getattr(
             engine,
@@ -379,8 +476,12 @@ async def health():
         )
     )
 
+    scanner_active = scanner_is_active()
+
     healthy = (
-        engine_running
+        application_state == "RUNNING"
+        and startup_completed
+        and engine_running
         and scanner_active
     )
 
@@ -390,10 +491,17 @@ async def health():
             if healthy
             else "degraded"
         ),
+
         "application": APP_NAME,
+
         "version": APP_VERSION,
+
+        "application_state": application_state,
+
         "running": engine_running,
+
         "scanner_active": scanner_active,
+
         "paper_trading_only": True,
     }
 
@@ -408,8 +516,8 @@ async def api_status():
     """
     Public-safe status endpoint.
 
-    Financial account details and open position data
-    are intentionally not exposed without authentication.
+    Financial account details, balances and open positions
+    are intentionally not exposed.
     """
 
     try:
@@ -423,25 +531,42 @@ async def api_status():
         if not isinstance(stats, dict):
             stats = {}
 
-        task = scanner_task
+        engine_running = bool(
+            getattr(
+                engine,
+                "running",
+                False,
+            )
+        )
 
-        scanner_active = (
-            task is not None
-            and not task.done()
+        scanner_active = scanner_is_active()
+
+        last_scan = safe_status_text(
+            getattr(
+                engine,
+                "last_scan",
+                None,
+            ),
+            default="",
+        )
+
+        last_error = getattr(
+            engine,
+            "last_error",
+            None,
         )
 
         return {
+
             "application": APP_NAME,
+
             "version": APP_VERSION,
+
             "mode": "PAPER",
 
-            "engine_running": bool(
-                getattr(
-                    engine,
-                    "running",
-                    False,
-                )
-            ),
+            "application_state": application_state,
+
+            "engine_running": engine_running,
 
             "scanner_active": scanner_active,
 
@@ -453,37 +578,33 @@ async def api_status():
                 )
             ),
 
-            "last_scan": getattr(
-                engine,
-                "last_scan",
-                None,
-            ),
+            "last_scan": last_scan,
 
-            "last_error": safe_status_text(
-                getattr(
-                    engine,
-                    "last_error",
-                    None,
-                ),
-                default="",
-            ),
+            # Do not expose internal error details publicly.
+            "has_error": bool(last_error),
 
             "scan_stats": {
+
                 "scanned": safe_count(
                     stats.get("scanned")
                 ),
+
                 "approved": safe_count(
                     stats.get("approved")
                 ),
+
                 "rejected": safe_count(
                     stats.get("rejected")
                 ),
+
                 "errors": safe_count(
                     stats.get("errors")
                 ),
+
             },
 
             "paper_trading_only": True,
+
         }
 
     except Exception:
@@ -493,11 +614,17 @@ async def api_status():
         )
 
         return {
+
             "application": APP_NAME,
+
             "version": APP_VERSION,
+
             "mode": "PAPER",
+
             "status": "temporarily_unavailable",
+
             "paper_trading_only": True,
+
         }
 
 
@@ -527,13 +654,13 @@ if __name__ == "__main__":
         logger.info(
             "Starting %s on %s:%s",
             APP_NAME,
-            HOST,
+            SERVER_HOST,
             SERVER_PORT,
         )
 
         uvicorn.run(
             app,
-            host=HOST,
+            host=SERVER_HOST,
             port=SERVER_PORT,
             log_level="info",
             access_log=True,
