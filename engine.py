@@ -199,13 +199,15 @@ class TradingEngine:
 
             symbol = symbol.strip().upper()
 
-            if (
-                not symbol
-                or not symbol.isalnum()
-            ):
-                raise ValueError(
-                    f"Invalid symbol: {symbol!r}"
-                )
+            parts = symbol.split("-")
+
+if (
+    len(parts) != 2
+    or not all(part.isalnum() for part in parts)
+):
+    raise ValueError(
+        f"Invalid symbol: {symbol!r}"
+    )
 
             if symbol in normalized:
                 raise ValueError(
