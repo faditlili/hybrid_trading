@@ -229,47 +229,38 @@ def _valid_https_url(value):
 # CONFIGURATION VALIDATION
 # ============================================================
 
+
 def validate_config():
     errors = []
 
-    # --------------------------------------------------------
     # SAFETY
-    # --------------------------------------------------------
-
     if PAPER_MODE is not True:
         errors.append("PAPER_MODE must remain True.")
 
-    # --------------------------------------------------------
     # SERVER
-    # --------------------------------------------------------
-
     if not isinstance(HOST, str) or not HOST:
         errors.append("HOST must be a non-empty string.")
 
-    if (isinstance(PORT, bool)
+    if (
+        isinstance(PORT, bool)
         or not isinstance(PORT, int)
         or not 1 <= PORT <= 65535
     ):
         errors.append("PORT must be between 1 and 65535.")
 
-    # --------------------------------------------------------
     # DATABASE
-    # --------------------------------------------------------
-
     if not isinstance(DB_PATH, str) or not DB_PATH:
         errors.append("DB_PATH must be a non-empty string.")
 
-    # --------------------------------------------------------
     # MARKET DATA
-    # --------------------------------------------------------
-
     if not _valid_https_url(BINGX_BASE_URL):
         errors.append("BINGX_BASE_URL must be a valid HTTPS URL.")
 
     if not isinstance(TIMEFRAME, str) or not TIMEFRAME:
         errors.append("TIMEFRAME must be a non-empty string.")
 
-    if ( isinstance(KLINE_LIMIT, bool)
+    if (
+        isinstance(KLINE_LIMIT, bool)
         or not isinstance(KLINE_LIMIT, int)
         or not 60 <= KLINE_LIMIT <= 1000
     ):
@@ -279,9 +270,9 @@ def validate_config():
         errors.append("MIN_QUOTE_VOLUME must be finite.")
     elif MIN_QUOTE_VOLUME < 0:
         errors.append("MIN_QUOTE_VOLUME cannot be negative.")
-    
-        if not isinstance(SYMBOLS, list) or not SYMBOLS:
-            if not isinstance(SYMBOLS, list) or not SYMBOLS:
+
+    # SYMBOLS
+    if not isinstance(SYMBOLS, list) or not SYMBOLS:
         errors.append("SYMBOLS must be a non-empty list.")
     else:
         if not all(isinstance(s, str) for s in SYMBOLS):
@@ -303,10 +294,8 @@ def validate_config():
                     errors.append(
                         f"Invalid trading symbol: {symbol!r}"
                     )
-    # --------------------------------------------------------
-    # ENGINE
-    # --------------------------------------------------------
 
+    # ENGINE
     integer_settings = {
         "SCAN_INTERVAL_SECONDS": SCAN_INTERVAL_SECONDS,
         "MAX_SCAN_DURATION_SECONDS": MAX_SCAN_DURATION_SECONDS,
@@ -318,22 +307,23 @@ def validate_config():
         if isinstance(value, bool) or not isinstance(value, int):
             errors.append(f"{name} must be an integer.")
 
-    if isinstance(SCAN_INTERVAL_SECONDS, int) and SCAN_INTERVAL_SECONDS <= 0:
-        errors.append("SCAN_INTERVAL_SECONDS must be positive.")
+    if isinstance(SCAN_INTERVAL_SECONDS, int) and not isinstance(SCAN_INTERVAL_SECONDS, bool):
+        if SCAN_INTERVAL_SECONDS <= 0:
+            errors.append("SCAN_INTERVAL_SECONDS must be positive.")
 
-    if isinstance(MAX_SCAN_DURATION_SECONDS, int) and MAX_SCAN_DURATION_SECONDS <= 0:
-        errors.append("MAX_SCAN_DURATION_SECONDS must be positive.")
+    if isinstance(MAX_SCAN_DURATION_SECONDS, int) and not isinstance(MAX_SCAN_DURATION_SECONDS, bool):
+        if MAX_SCAN_DURATION_SECONDS <= 0:
+            errors.append("MAX_SCAN_DURATION_SECONDS must be positive.")
 
-    if isinstance(MAX_OPEN_POSITIONS, int) and MAX_OPEN_POSITIONS < 1:
-        errors.append("MAX_OPEN_POSITIONS must be at least 1.")
+    if isinstance(MAX_OPEN_POSITIONS, int) and not isinstance(MAX_OPEN_POSITIONS, bool):
+        if MAX_OPEN_POSITIONS < 1:
+            errors.append("MAX_OPEN_POSITIONS must be at least 1.")
 
-    if isinstance(MIN_SCORE_TO_ENTER, int) and not 0 <= MIN_SCORE_TO_ENTER <= 100:
-        errors.append("MIN_SCORE_TO_ENTER must be between 0 and 100.")
+    if isinstance(MIN_SCORE_TO_ENTER, int) and not isinstance(MIN_SCORE_TO_ENTER, bool):
+        if not 0 <= MIN_SCORE_TO_ENTER <= 100:
+            errors.append("MIN_SCORE_TO_ENTER must be between 0 and 100.")
 
-    # --------------------------------------------------------
     # PAPER ACCOUNT
-    # --------------------------------------------------------
-
     numeric_settings = {
         "INITIAL_BALANCE": INITIAL_BALANCE,
         "RISK_PER_TRADE_PCT": RISK_PER_TRADE_PCT,
@@ -375,27 +365,27 @@ def validate_config():
         if TARGET_R_MULTIPLIER <= 0:
             errors.append("TARGET_R_MULTIPLIER must be positive.")
 
-    # --------------------------------------------------------
     # AI COUNCIL
-    # --------------------------------------------------------
-
     if not _valid_https_url(HF_API_URL):
         errors.append("HF_API_URL must be a valid HTTPS URL.")
 
-    if not isinstance(AI_REQUEST_TIMEOUT_SECONDS, bool)
+    if (
+        isinstance(AI_REQUEST_TIMEOUT_SECONDS, bool)
         or not isinstance(AI_REQUEST_TIMEOUT_SECONDS, (int, float))
         or not _is_finite_number(AI_REQUEST_TIMEOUT_SECONDS)
         or AI_REQUEST_TIMEOUT_SECONDS <= 0
     ):
         errors.append("AI_REQUEST_TIMEOUT_SECONDS must be positive.")
 
-    if (isinstance(AI_MAX_CONCURRENT_REQUESTS, bool)
+    if (
+        isinstance(AI_MAX_CONCURRENT_REQUESTS, bool)
         or not isinstance(AI_MAX_CONCURRENT_REQUESTS, int)
         or AI_MAX_CONCURRENT_REQUESTS < 1
     ):
         errors.append("AI_MAX_CONCURRENT_REQUESTS must be at least 1.")
 
-    if (isinstance(AI_MIN_VALID_MODELS, bool)
+    if (
+        isinstance(AI_MIN_VALID_MODELS, bool)
         or not isinstance(AI_MIN_VALID_MODELS, int)
         or AI_MIN_VALID_MODELS < 1
     ):
@@ -406,10 +396,7 @@ def validate_config():
     elif not 0.5 < AI_MIN_AGREEMENT_RATIO <= 1:
         errors.append("AI_MIN_AGREEMENT_RATIO must be in (0.5, 1].")
 
-    # --------------------------------------------------------
     # NEWS
-    # --------------------------------------------------------
-
     if NEWS_REFRESH_SECONDS <= 0:
         errors.append("NEWS_REFRESH_SECONDS must be positive.")
 
@@ -419,10 +406,7 @@ def validate_config():
     if NEWS_REQUEST_TIMEOUT_SECONDS <= 0:
         errors.append("NEWS_REQUEST_TIMEOUT_SECONDS must be positive.")
 
-    # --------------------------------------------------------
     # HTTP
-    # --------------------------------------------------------
-
     if HTTP_TIMEOUT_SECONDS <= 0:
         errors.append("HTTP_TIMEOUT_SECONDS must be positive.")
 
@@ -435,10 +419,7 @@ def validate_config():
     if HTTP_RETRY_ATTEMPTS < 0:
         errors.append("HTTP_RETRY_ATTEMPTS cannot be negative.")
 
-    # --------------------------------------------------------
     # LOGGING
-    # --------------------------------------------------------
-
     if LOG_LEVEL not in {
         "CRITICAL",
         "ERROR",
@@ -448,10 +429,7 @@ def validate_config():
     }:
         errors.append("LOG_LEVEL is invalid.")
 
-    # --------------------------------------------------------
     # RESULT
-    # --------------------------------------------------------
-
     if errors:
         raise ValueError(
             "Invalid application configuration:\n- "
@@ -459,10 +437,3 @@ def validate_config():
         )
 
     return True
-
-
-# ============================================================
-# STARTUP VALIDATION
-# ============================================================
-
-validate_config()
