@@ -9,4 +9,9 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 COPY . .
 
+RUN echo "===== PROJECT FILES =====" \
+    && ls -la /code \
+    && echo "===== MARKET DATA CHECK =====" \
+    && test -f /code/market_data.py
+
 CMD ["python", "main.py"]
