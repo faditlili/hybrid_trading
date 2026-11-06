@@ -34,11 +34,14 @@ def safe_float(value, default=None):
 
 
 def close_enough(a, b):
+    if not valid_number(a) or not valid_number(b):
+        return False
+
     return math.isclose(
         float(a),
         float(b),
         rel_tol=1e-8,
-        abs_tol=1e-8
+        abs_tol=1e-8,
     )
 
 
@@ -52,54 +55,46 @@ class Database:
             raise ValueError("Invalid INITIAL_BALANCE")
 
         if float(INITIAL_BALANCE) <= 0:
-            raise ValueError(
-                "INITIAL_BALANCE must be positive"
-            )
+            raise ValueError("INITIAL_BALANCE must be positive")
 
         self.lock = threading.RLock()
-
-        self.conn = sqlite3.connect(
-            self.db_path,
-            timeout=30,
-            check_same_thread=False
-        )
-
-        self.conn.row_factory = sqlite3.Row
+        self.conn = None
 
         try:
+            self.conn = sqlite3.connect(
+                self.db_path,
+                timeout=30,
+                check_same_thread=False,
+            )
+
+            self.conn.row_factory = sqlite3.Row
+
             with self.lock:
-                self.conn.execute("PRAGMA journal_mode=WAL")
                 self.conn.execute("PRAGMA busy_timeout=30000")
                 self.conn.execute("PRAGMA foreign_keys=ON")
+                self.conn.execute("PRAGMA journal_mode=WAL")
 
                 self._create_tables()
                 self._migrate()
 
-            logger.info(
-                "Database initialized: %s",
-                self.db_path
-            )
+            logger.info("Database initialized: %s", self.db_path)
 
         except Exception:
             if self.conn is not None:
                 self.conn.close()
                 self.conn = None
-
             raise
 
     def _ensure_open(self):
 
         if self.conn is None:
-            raise RuntimeError(
-                "Database connection is closed"
-            )
+            raise RuntimeError("Database connection is closed")
 
     def _create_tables(self):
 
         self._ensure_open()
 
         self.conn.executescript("""
-
         CREATE TABLE IF NOT EXISTS account (
             id INTEGER PRIMARY KEY,
             balance REAL NOT NULL,
@@ -150,7 +145,6 @@ class Database:
             message TEXT NOT NULL,
             timestamp TEXT NOT NULL
         );
-
         """)
 
         self.conn.execute(
@@ -159,7 +153,7 @@ class Database:
             (id, balance, realized_pnl)
             VALUES (1, ?, 0)
             """,
-            (float(INITIAL_BALANCE),)
+            (float(INITIAL_BALANCE),),
         )
 
         self.conn.commit()
@@ -167,6 +161,17 @@ class Database:
     def _ensure_columns(self, table, definitions):
 
         self._ensure_open()
+
+        allowed_tables = {
+            "account",
+            "positions",
+            "trades",
+            "decisions",
+            "events",
+        }
+
+        if table not in allowed_tables:
+            raise ValueError("Invalid migration table")
 
         existing = {
             row["name"]
@@ -186,7 +191,7 @@ class Database:
                 logger.info(
                     "Database migration: added %s.%s",
                     table,
-                    column
+                    column,
                 )
 
     def _migrate(self):
@@ -199,8 +204,8 @@ class Database:
                 "account",
                 {
                     "balance": "REAL NOT NULL DEFAULT 0",
-                    "realized_pnl": "REAL NOT NULL DEFAULT 0"
-                }
+                    "realized_pnl": "REAL NOT NULL DEFAULT 0",
+                },
             )
 
             self._ensure_columns(
@@ -213,8 +218,8 @@ class Database:
                     "entry_fee": "REAL NOT NULL DEFAULT 0",
                     "stop_loss": "REAL NOT NULL DEFAULT 0",
                     "take_profit": "REAL NOT NULL DEFAULT 0",
-                    "opened_at": "TEXT"
-                }
+                    "opened_at": "TEXT",
+                },
             )
 
             self._ensure_columns(
@@ -231,8 +236,8 @@ class Database:
                     "exit_fee": "REAL NOT NULL DEFAULT 0",
                     "reason": "TEXT",
                     "opened_at": "TEXT",
-                    "closed_at": "TEXT"
-                }
+                    "closed_at": "TEXT",
+                },
             )
 
             self._ensure_columns(
@@ -243,8 +248,8 @@ class Database:
                     "score": "INTEGER NOT NULL DEFAULT 0",
                     "ai_vote": "TEXT",
                     "reasons": "TEXT",
-                    "timestamp": "TEXT"
-                }
+                    "timestamp": "TEXT",
+                },
             )
 
             self._ensure_columns(
@@ -252,12 +257,10 @@ class Database:
                 {
                     "level": "TEXT",
                     "message": "TEXT",
-                    "timestamp": "TEXT"
-                }
+                    "timestamp": "TEXT",
+                },
             )
 
-            # Normalize existing symbols before adding
-            # the unique index.
             self.conn.execute(
                 """
                 UPDATE positions
@@ -295,9 +298,7 @@ class Database:
                 """
             )
 
-        logger.info(
-            "Database migrations completed"
-        )
+        logger.info("Database migrations completed")
 
     def get_account(self):
 
@@ -312,7 +313,18 @@ class Database:
                 """
             ).fetchone()
 
-            return dict(row) if row else None
+            if row is None:
+                return None
+
+            result = dict(row)
+
+            if (
+                not valid_number(result.get("balance"))
+                or not valid_number(result.get("realized_pnl"))
+            ):
+                raise RuntimeError("Invalid account data in database")
+
+            return result
 
     def get_positions(self):
 
@@ -327,25 +339,44 @@ class Database:
                 """
             ).fetchall()
 
-            return [
-                {
-                    "symbol": row["symbol"],
-                    "quantity": row["quantity"],
-                    "entry_price": row["entry_price"],
-                    "allocation": row["allocation"],
-                    "entry_fee": row["entry_fee"],
-                    "stop_loss": row["stop_loss"],
-                    "take_profit": row["take_profit"],
-                    "opened_at": row["opened_at"]
-                }
-                for row in rows
-            ]
+            results = []
 
-    def open_position_atomic(
-        self,
-        position,
-        new_balance
-    ):
+            for row in rows:
+                item = dict(row)
+
+                numeric_fields = (
+                    "quantity",
+                    "entry_price",
+                    "allocation",
+                    "entry_fee",
+                    "stop_loss",
+                    "take_profit",
+                )
+
+                if any(
+                    not valid_number(item.get(field))
+                    for field in numeric_fields
+                ):
+                    logger.error(
+                        "Invalid position data found for %s",
+                        item.get("symbol"),
+                    )
+                    raise RuntimeError("Invalid position data in database")
+
+                results.append({
+                    "symbol": item["symbol"],
+                    "quantity": item["quantity"],
+                    "entry_price": item["entry_price"],
+                    "allocation": item["allocation"],
+                    "entry_fee": item["entry_fee"],
+                    "stop_loss": item["stop_loss"],
+                    "take_profit": item["take_profit"],
+                    "opened_at": item["opened_at"],
+                })
+
+            return results
+
+    def open_position_atomic(self, position, new_balance):
 
         if not isinstance(position, dict):
             return False
@@ -372,7 +403,7 @@ class Database:
             entry_fee,
             stop_loss,
             take_profit,
-            new_balance
+            new_balance,
         )
 
         if any(value is None for value in values):
@@ -390,10 +421,12 @@ class Database:
         ):
             return False
 
-        if not close_enough(
-            quantity * entry_price,
-            allocation
-        ):
+        if not close_enough(quantity * entry_price, allocation):
+            return False
+
+        opened_at = position.get("opened_at") or utc_timestamp()
+
+        if not isinstance(opened_at, str):
             return False
 
         with self.lock:
@@ -417,19 +450,15 @@ class Database:
                             "Account record missing"
                         )
 
-                    current_balance = safe_float(
-                        account["balance"]
-                    )
+                    current_balance = safe_float(account["balance"])
 
-                    if current_balance is None:
+                    if current_balance is None or current_balance < 0:
                         raise sqlite3.IntegrityError(
                             "Invalid account balance"
                         )
 
                     expected_balance = (
-                        current_balance
-                        - allocation
-                        - entry_fee
+                        current_balance - allocation - entry_fee
                     )
 
                     if expected_balance < -1e-8:
@@ -437,10 +466,9 @@ class Database:
                             "Insufficient paper balance"
                         )
 
-                    if not close_enough(
-                        new_balance,
-                        max(0.0, expected_balance)
-                    ):
+                    expected_balance = max(0.0, expected_balance)
+
+                    if not close_enough(new_balance, expected_balance):
                         raise sqlite3.IntegrityError(
                             "New balance calculation mismatch"
                         )
@@ -467,11 +495,8 @@ class Database:
                             entry_fee,
                             stop_loss,
                             take_profit,
-                            position.get(
-                                "opened_at",
-                                utc_timestamp()
-                            )
-                        )
+                            opened_at,
+                        ),
                     )
 
                     cursor = self.conn.execute(
@@ -480,7 +505,7 @@ class Database:
                         SET balance=?
                         WHERE id=1
                         """,
-                        (max(0.0, expected_balance),)
+                        (expected_balance,),
                     )
 
                     if cursor.rowcount != 1:
@@ -491,9 +516,7 @@ class Database:
                 return True
 
             except sqlite3.Error:
-                logger.exception(
-                    "Failed to open paper position"
-                )
+                logger.exception("Failed to open paper position")
                 return False
 
     def close_position_atomic(
@@ -501,7 +524,7 @@ class Database:
         symbol,
         trade,
         new_balance,
-        new_realized_pnl
+        new_realized_pnl,
     ):
 
         if not isinstance(symbol, str) or not symbol.strip():
@@ -531,7 +554,7 @@ class Database:
             entry_fee,
             exit_fee,
             new_balance,
-            new_realized_pnl
+            new_realized_pnl,
         )
 
         if any(value is None for value in values):
@@ -566,7 +589,7 @@ class Database:
                         FROM positions
                         WHERE symbol=?
                         """,
-                        (symbol,)
+                        (symbol,),
                     ).fetchone()
 
                     if row is None:
@@ -574,38 +597,42 @@ class Database:
                             "Position does not exist"
                         )
 
-                    stored_quantity = float(row["quantity"])
-                    stored_entry = float(row["entry_price"])
-                    stored_allocation = float(row["allocation"])
-                    stored_entry_fee = float(row["entry_fee"])
+                    stored_quantity = safe_float(row["quantity"])
+                    stored_entry = safe_float(row["entry_price"])
+                    stored_allocation = safe_float(row["allocation"])
+                    stored_entry_fee = safe_float(row["entry_fee"])
 
-                    if not close_enough(
-                        quantity,
-                        stored_quantity
+                    if any(
+                        value is None
+                        for value in (
+                            stored_quantity,
+                            stored_entry,
+                            stored_allocation,
+                            stored_entry_fee,
+                        )
                     ):
+                        raise sqlite3.IntegrityError(
+                            "Invalid stored position"
+                        )
+
+                    if not close_enough(quantity, stored_quantity):
                         raise sqlite3.IntegrityError(
                             "Position quantity mismatch"
                         )
 
-                    if not close_enough(
-                        entry_price,
-                        stored_entry
-                    ):
+                    if not close_enough(entry_price, stored_entry):
                         raise sqlite3.IntegrityError(
                             "Position entry price mismatch"
                         )
 
-                    if not close_enough(
-                        entry_fee,
-                        stored_entry_fee
-                    ):
+                    if not close_enough(entry_fee, stored_entry_fee):
                         raise sqlite3.IntegrityError(
                             "Position entry fee mismatch"
                         )
 
                     if not close_enough(
                         quantity * entry_price,
-                        stored_allocation
+                        stored_allocation,
                     ):
                         raise sqlite3.IntegrityError(
                             "Stored allocation mismatch"
@@ -617,23 +644,15 @@ class Database:
                     )
 
                     expected_net = (
-                        expected_gross
-                        - entry_fee
-                        - exit_fee
+                        expected_gross - entry_fee - exit_fee
                     )
 
-                    if not close_enough(
-                        gross_pnl,
-                        expected_gross
-                    ):
+                    if not close_enough(gross_pnl, expected_gross):
                         raise sqlite3.IntegrityError(
                             "Gross PnL mismatch"
                         )
 
-                    if not close_enough(
-                        net_pnl,
-                        expected_net
-                    ):
+                    if not close_enough(net_pnl, expected_net):
                         raise sqlite3.IntegrityError(
                             "Net PnL mismatch"
                         )
@@ -651,13 +670,8 @@ class Database:
                             "Account record missing"
                         )
 
-                    current_balance = safe_float(
-                        account["balance"]
-                    )
-
-                    current_realized = safe_float(
-                        account["realized_pnl"]
-                    )
+                    current_balance = safe_float(account["balance"])
+                    current_realized = safe_float(account["realized_pnl"])
 
                     if (
                         current_balance is None
@@ -667,8 +681,6 @@ class Database:
                             "Invalid account values"
                         )
 
-                    # The allocation was reserved when
-                    # the position was opened.
                     expected_balance = (
                         current_balance
                         + stored_allocation
@@ -676,27 +688,23 @@ class Database:
                         - exit_fee
                     )
 
-                    expected_realized = (
-                        current_realized
-                        + net_pnl
-                    )
+                    expected_realized = current_realized + net_pnl
 
                     if expected_balance < -1e-8:
                         raise sqlite3.IntegrityError(
                             "Invalid resulting balance"
                         )
 
-                    if not close_enough(
-                        new_balance,
-                        max(0.0, expected_balance)
-                    ):
+                    expected_balance = max(0.0, expected_balance)
+
+                    if not close_enough(new_balance, expected_balance):
                         raise sqlite3.IntegrityError(
                             "New balance calculation mismatch"
                         )
 
                     if not close_enough(
                         new_realized_pnl,
-                        expected_realized
+                        expected_realized,
                     ):
                         raise sqlite3.IntegrityError(
                             "Realized PnL calculation mismatch"
@@ -730,12 +738,10 @@ class Database:
                             net_pnl,
                             entry_fee,
                             exit_fee,
-                            str(
-                                trade.get("reason", "")
-                            )[:200],
+                            str(trade.get("reason", ""))[:200],
                             row["opened_at"],
-                            utc_timestamp()
-                        )
+                            utc_timestamp(),
+                        ),
                     )
 
                     cursor = self.conn.execute(
@@ -743,7 +749,7 @@ class Database:
                         DELETE FROM positions
                         WHERE symbol=?
                         """,
-                        (symbol,)
+                        (symbol,),
                     )
 
                     if cursor.rowcount != 1:
@@ -758,9 +764,9 @@ class Database:
                         WHERE id=1
                         """,
                         (
-                            max(0.0, expected_balance),
-                            expected_realized
-                        )
+                            expected_balance,
+                            expected_realized,
+                        ),
                     )
 
                     if cursor.rowcount != 1:
@@ -771,9 +777,7 @@ class Database:
                 return True
 
             except sqlite3.Error:
-                logger.exception(
-                    "Failed to close paper position"
-                )
+                logger.exception("Failed to close paper position")
                 return False
 
     def log_decision(self, *args, **kwargs):
@@ -782,22 +786,19 @@ class Database:
             data = args[0]
 
         else:
-            data = kwargs
+            keys = [
+                "symbol",
+                "action",
+                "score",
+                "reasons",
+                "ai_vote",
+                "timestamp",
+            ]
 
-            if args:
-                keys = [
-                    "symbol",
-                    "action",
-                    "score",
-                    "reasons",
-                    "ai_vote",
-                    "timestamp"
-                ]
-
-                data = {
-                    **dict(zip(keys, args)),
-                    **kwargs
-                }
+            data = {
+                **dict(zip(keys, args)),
+                **kwargs,
+            }
 
         if not isinstance(data, dict):
             return False
@@ -810,20 +811,16 @@ class Database:
             else:
                 reasons_text = json.dumps(
                     reasons,
-                    ensure_ascii=False
+                    ensure_ascii=False,
+                    allow_nan=False,
                 )
 
-            score = safe_float(
-                data.get("score", 0)
-            )
+            score = safe_float(data.get("score", 0))
 
             if score is None:
                 score = 0
 
-            score = max(
-                0,
-                min(100, int(score))
-            )
+            score = max(0, min(100, int(score)))
 
             with self.lock:
                 self._ensure_open()
@@ -842,24 +839,13 @@ class Database:
                         VALUES (?, ?, ?, ?, ?, ?)
                         """,
                         (
-                            str(
-                                data.get("symbol", "UNKNOWN")
-                            )[:50],
-                            str(
-                                data.get("action", "WAIT")
-                            )[:50],
+                            str(data.get("symbol", "UNKNOWN"))[:50],
+                            str(data.get("action", "WAIT"))[:50],
                             score,
-                            str(
-                                data.get("ai_vote", "")
-                            )[:50],
+                            str(data.get("ai_vote", ""))[:50],
                             reasons_text[:5000],
-                            str(
-                                data.get(
-                                    "timestamp",
-                                    utc_timestamp()
-                                )
-                            )
-                        )
+                            str(data.get("timestamp") or utc_timestamp()),
+                        ),
                     )
 
             return True
@@ -868,11 +854,9 @@ class Database:
             sqlite3.Error,
             TypeError,
             ValueError,
-            RuntimeError
+            RuntimeError,
         ):
-            logger.exception(
-                "Failed to log decision"
-            )
+            logger.exception("Failed to log decision")
             return False
 
     def get_recent_decisions(self, limit=15):
@@ -889,7 +873,7 @@ class Database:
                 ORDER BY id DESC
                 LIMIT ?
                 """,
-                (limit,)
+                (limit,),
             ).fetchall()
 
             results = []
@@ -901,7 +885,6 @@ class Database:
                     item["reasons"] = json.loads(
                         item["reasons"] or "[]"
                     )
-
                 except (TypeError, ValueError):
                     item["reasons"] = [
                         str(item.get("reasons", ""))
@@ -925,19 +908,17 @@ class Database:
                 ORDER BY id DESC
                 LIMIT ?
                 """,
-                (limit,)
+                (limit,),
             ).fetchall()
 
-            return [
-                dict(row) for row in rows
-            ]
+            return [dict(row) for row in rows]
 
     def log_event(self, level, message):
 
-        with self.lock:
-            self._ensure_open()
+        try:
+            with self.lock:
+                self._ensure_open()
 
-            try:
                 with self.conn:
                     self.conn.execute(
                         """
@@ -951,17 +932,15 @@ class Database:
                         (
                             str(level)[:30],
                             str(message)[:2000],
-                            utc_timestamp()
-                        )
+                            utc_timestamp(),
+                        ),
                     )
 
-                return True
+            return True
 
-            except sqlite3.Error:
-                logger.exception(
-                    "Failed to log event"
-                )
-                return False
+        except (sqlite3.Error, RuntimeError):
+            logger.exception("Failed to log event")
+            return False
 
     def get_recent_events(self, limit=50):
 
@@ -977,25 +956,23 @@ class Database:
                 ORDER BY id DESC
                 LIMIT ?
                 """,
-                (limit,)
+                (limit,),
             ).fetchall()
 
-            return [
-                dict(row) for row in rows
-            ]
+            return [dict(row) for row in rows]
 
     @staticmethod
     def _safe_limit(limit):
+
+        if isinstance(limit, bool):
+            return 15
 
         try:
             limit = int(limit)
         except (TypeError, ValueError, OverflowError):
             limit = 15
 
-        return max(
-            1,
-            min(limit, 500)
-        )
+        return max(1, min(limit, 500))
 
     def close(self):
 
@@ -1004,6 +981,4 @@ class Database:
                 self.conn.close()
                 self.conn = None
 
-                logger.info(
-                    "Database connection closed"
-                )
+                logger.info("Database connection closed")
