@@ -1,7 +1,9 @@
 import math
 import logging
+import threading
 
 from config import (
+    INITIAL_BALANCE,
     RISK_PER_TRADE_PCT,
     MAX_ALLOCATION_PCT,
     FEE_RATE,
@@ -11,13 +13,15 @@ from config import (
     MAX_OPEN_POSITIONS
 )
 
+
 logger = logging.getLogger(__name__)
 
 
 def valid_number(value):
+
     try:
         return math.isfinite(float(value))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return False
 
 
@@ -26,341 +30,424 @@ class PaperTrader:
     def __init__(self, db):
 
         self.db = db
+        self.lock = threading.RLock()
 
         account = self.db.get_account()
 
-        self.balance = float(account["balance"])
-        self.realized_pnl = float(account["realized_pnl"])
-        self.wins = int(account["wins"])
-        self.losses = int(account["losses"])
-
-        self.positions = {
-            position["symbol"]: position
-            for position in self.db.get_positions()
-        }
-
-        self.last_prices = {}
-
-    def _save_open(self, position):
-
-        return self.db.open_position_atomic(
-            position=position,
-            balance=self.balance,
-            realized_pnl=self.realized_pnl,
-            wins=self.wins,
-            losses=self.losses
+        self.balance = float(
+            account.get("balance", INITIAL_BALANCE)
         )
 
-    def _save_close(self, symbol, trade):
-
-        return self.db.close_position_atomic(
-            symbol=symbol,
-            trade=trade,
-            balance=self.balance,
-            realized_pnl=self.realized_pnl,
-            wins=self.wins,
-            losses=self.losses
+        self.realized_pnl = float(
+            account.get("realized_pnl", 0)
         )
+
+    def _get_positions(self):
+
+        positions = self.db.get_positions()
+
+        return positions if isinstance(
+            positions, list
+        ) else []
+
+    def _slippage(self):
+
+        return SIMULATED_SLIPPAGE_BPS / 10000
 
     def open_position(self, symbol, price, atr):
 
-        if symbol in self.positions:
-            return False
+        with self.lock:
 
-        if len(self.positions) >= MAX_OPEN_POSITIONS:
-            return False
+            if not isinstance(symbol, str) or not symbol:
+                return False
 
-        if not valid_number(price) or not valid_number(atr):
-            return False
+            if not valid_number(price) or not valid_number(atr):
+                return False
 
-        price = float(price)
-        atr = float(atr)
+            price = float(price)
+            atr = float(atr)
 
-        if price <= 0 or atr <= 0 or self.balance <= 0:
-            return False
+            if price <= 0 or atr <= 0:
+                return False
 
-        stop_distance = atr * STOP_ATR_MULTIPLIER
+            positions = self._get_positions()
 
-        if stop_distance <= 0:
-            return False
+            if any(
+                p.get("symbol") == symbol
+                for p in positions
+            ):
 
-        risk_budget = self.balance * RISK_PER_TRADE_PCT
+                logger.info(
+                    "Position already exists for %s",
+                    symbol
+                )
 
-        max_allocation = self.balance * MAX_ALLOCATION_PCT
+                return False
 
-        quantity = min(
-            risk_budget / stop_distance,
-            max_allocation / price
-        )
+            if len(positions) >= MAX_OPEN_POSITIONS:
+                return False
 
-        if not valid_number(quantity) or quantity <= 0:
-            return False
+            stop_distance = atr * STOP_ATR_MULTIPLIER
 
-        slippage = SIMULATED_SLIPPAGE_BPS / 10000
+            if stop_distance <= 0:
+                return False
 
-        entry_price = price * (1 + slippage)
+            risk_budget = (
+                self.balance * RISK_PER_TRADE_PCT
+            )
 
-        allocation = quantity * entry_price
+            max_allocation = (
+                self.balance * MAX_ALLOCATION_PCT
+            )
 
-        entry_fee = allocation * FEE_RATE
+            quantity_by_risk = (
+                risk_budget / stop_distance
+            )
 
-        total_cost = allocation + entry_fee
+            quantity_by_allocation = (
+                max_allocation / price
+            )
 
-        if total_cost > self.balance:
-            return False
+            quantity = min(
+                quantity_by_risk,
+                quantity_by_allocation
+            )
 
-        stop_loss = entry_price - stop_distance
+            if not valid_number(quantity) or quantity <= 0:
+                return False
 
-        take_profit = (
-            entry_price
-            + stop_distance * TARGET_R_MULTIPLIER
-        )
+            entry_price = price * (
+                1 + self._slippage()
+            )
 
-        if stop_loss <= 0 or take_profit <= entry_price:
-            return False
+            allocation = quantity * entry_price
 
-        position = {
-            "symbol": symbol,
-            "quantity": quantity,
-            "entry_price": entry_price,
-            "allocation": allocation,
-            "entry_fee": entry_fee,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit,
-            "entry_value": allocation
-        }
+            entry_fee = allocation * FEE_RATE
 
-        new_balance = self.balance - total_cost
+            total_cost = allocation + entry_fee
 
-        if not self.db.open_position_atomic(
-            position=position,
-            balance=new_balance,
-            realized_pnl=self.realized_pnl,
-            wins=self.wins,
-            losses=self.losses
-        ):
-            logger.error(
-                "Database rejected opening position: %s",
+            if total_cost > self.balance:
+                return False
+
+            stop_loss = (
+                entry_price - stop_distance
+            )
+
+            take_profit = (
+                entry_price
+                + stop_distance * TARGET_R_MULTIPLIER
+            )
+
+            if stop_loss <= 0 or take_profit <= entry_price:
+                return False
+
+            new_balance = self.balance - total_cost
+
+            position = {
+                "symbol": symbol,
+                "quantity": quantity,
+                "entry_price": entry_price,
+                "current_price": entry_price,
+                "allocation": allocation,
+                "entry_fee": entry_fee,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "unrealized_pnl": 0.0
+            }
+
+            success = self.db.open_position_atomic(
+                position,
+                new_balance
+            )
+
+            if not success:
+                return False
+
+            self.balance = new_balance
+
+            logger.info(
+                "Paper position opened: %s",
                 symbol
             )
-            return False
 
-        self.balance = new_balance
-        self.positions[symbol] = position
-        self.last_prices[symbol] = price
+            return True
 
-        logger.info(
-            "Paper position opened: %s",
-            symbol
-        )
+    def close_position(
+        self,
+        symbol,
+        price,
+        reason=""
+    ):
 
-        return True
+        with self.lock:
 
-    def close_position(self, symbol, price, reason="MANUAL"):
+            if not valid_number(price):
+                return False
 
-        position = self.positions.get(symbol)
+            price = float(price)
 
-        if not position:
-            return False
+            if price <= 0:
+                return False
 
-        if not valid_number(price):
-            return False
+            positions = self._get_positions()
 
-        price = float(price)
-
-        if price <= 0:
-            return False
-
-        slippage = SIMULATED_SLIPPAGE_BPS / 10000
-
-        exit_price = price * (1 - slippage)
-
-        quantity = float(position["quantity"])
-
-        allocation = float(position["allocation"])
-
-        entry_fee = float(position["entry_fee"])
-
-        gross_pnl = (
-            exit_price - float(position["entry_price"])
-        ) * quantity
-
-        exit_fee = exit_price * quantity * FEE_RATE
-
-        net_pnl = gross_pnl - entry_fee - exit_fee
-
-        new_balance = (
-            self.balance
-            + allocation
-            + gross_pnl
-            - exit_fee
-        )
-
-        new_realized = self.realized_pnl + net_pnl
-
-        new_wins = self.wins + (1 if net_pnl > 0 else 0)
-
-        new_losses = self.losses + (1 if net_pnl <= 0 else 0)
-
-        trade = {
-            "symbol": symbol,
-            "entry_price": float(position["entry_price"]),
-            "exit_price": exit_price,
-            "quantity": quantity,
-            "gross_pnl": gross_pnl,
-            "net_pnl": net_pnl,
-            "entry_fee": entry_fee,
-            "exit_fee": exit_fee,
-            "reason": str(reason)
-        }
-
-        if not self.db.close_position_atomic(
-            symbol=symbol,
-            trade=trade,
-            balance=new_balance,
-            realized_pnl=new_realized,
-            wins=new_wins,
-            losses=new_losses
-        ):
-            logger.error(
-                "Database rejected closing position: %s",
-                symbol
+            position = next(
+                (
+                    p for p in positions
+                    if p.get("symbol") == symbol
+                ),
+                None
             )
-            return False
 
-        self.balance = new_balance
-        self.realized_pnl = new_realized
-        self.wins = new_wins
-        self.losses = new_losses
+            if not position:
+                return False
 
-        del self.positions[symbol]
-        self.last_prices.pop(symbol, None)
+            quantity = float(
+                position.get("quantity", 0)
+            )
 
-        logger.info(
-            "Paper position closed: %s | PnL: %.4f",
-            symbol,
-            net_pnl
-        )
+            entry_price = float(
+                position.get("entry_price", 0)
+            )
 
-        return True
+            allocation = float(
+                position.get("allocation", 0)
+            )
+
+            entry_fee = float(
+                position.get("entry_fee", 0)
+            )
+
+            if quantity <= 0 or entry_price <= 0:
+                return False
+
+            exit_price = price * (
+                1 - self._slippage()
+            )
+
+            exit_value = quantity * exit_price
+
+            exit_fee = exit_value * FEE_RATE
+
+            gross_pnl = (
+                exit_value - allocation
+            )
+
+            net_pnl = (
+                gross_pnl - entry_fee - exit_fee
+            )
+
+            returned_balance = (
+                allocation
+                + gross_pnl
+                - exit_fee
+            )
+
+            new_balance = (
+                self.balance + returned_balance
+            )
+
+            new_realized_pnl = (
+                self.realized_pnl + net_pnl
+            )
+
+            trade = {
+                "symbol": symbol,
+                "quantity": quantity,
+                "entry_price": entry_price,
+                "exit_price": exit_price,
+                "allocation": allocation,
+                "entry_fee": entry_fee,
+                "exit_fee": exit_fee,
+                "gross_pnl": gross_pnl,
+                "net_pnl": net_pnl,
+                "reason": str(reason)[:200]
+            }
+
+            success = self.db.close_position_atomic(
+                symbol,
+                trade,
+                new_balance,
+                new_realized_pnl
+            )
+
+            if not success:
+                return False
+
+            self.balance = new_balance
+            self.realized_pnl = new_realized_pnl
+
+            logger.info(
+                "Paper position closed: %s | PnL: %.4f",
+                symbol,
+                net_pnl
+            )
+
+            return True
+
+    def update_positions(self, market):
+
+        with self.lock:
+
+            positions = self._get_positions()
+
+            for position in positions:
+
+                symbol = position.get("symbol")
+
+                if not symbol:
+                    continue
+
+                try:
+
+                    ticker = awaitable = None
+
+                    # Market data is asynchronous.
+                    # This method is asynchronous below.
+
+                except Exception:
+
+                    logger.exception(
+                        "Position update failed for %s",
+                        symbol
+                    )
 
     async def update_positions(self, market):
 
-        for symbol in list(self.positions.keys()):
+        positions = self._get_positions()
+
+        for position in positions:
+
+            symbol = position.get("symbol")
+
+            if not symbol:
+                continue
 
             try:
 
                 ticker = await market.get_ticker(symbol)
 
-                price = float(ticker["price"])
-
-                if not valid_number(price) or price <= 0:
+                if not isinstance(ticker, dict):
                     continue
 
-                self.last_prices[symbol] = price
+                price = ticker.get("price")
 
-                position = self.positions[symbol]
+                if not valid_number(price):
+                    continue
 
-                if price <= float(position["stop_loss"]):
+                price = float(price)
+
+                if price <= 0:
+                    continue
+
+                quantity = float(
+                    position.get("quantity", 0)
+                )
+
+                entry_price = float(
+                    position.get("entry_price", 0)
+                )
+
+                if quantity <= 0 or entry_price <= 0:
+                    continue
+
+                current_value = quantity * price
+
+                allocation = float(
+                    position.get("allocation", 0)
+                )
+
+                entry_fee = float(
+                    position.get("entry_fee", 0)
+                )
+
+                unrealized_pnl = (
+                    current_value
+                    - allocation
+                    - entry_fee
+                    - current_value * FEE_RATE
+                )
+
+                # Update the position in memory only.
+                position["current_price"] = price
+                position["unrealized_pnl"] = unrealized_pnl
+
+                stop_loss = float(
+                    position.get("stop_loss", 0)
+                )
+
+                take_profit = float(
+                    position.get("take_profit", 0)
+                )
+
+                if stop_loss > 0 and price <= stop_loss:
 
                     self.close_position(
                         symbol,
                         price,
-                        "STOP_LOSS"
+                        "Stop loss"
                     )
 
-                elif price >= float(position["take_profit"]):
+                elif take_profit > 0 and price >= take_profit:
 
                     self.close_position(
                         symbol,
                         price,
-                        "TAKE_PROFIT"
+                        "Take profit"
                     )
 
-            except Exception as exc:
+            except Exception:
 
-                logger.warning(
-                    "Position monitoring failed for %s: %s",
-                    symbol,
-                    str(exc)[:200]
+                logger.exception(
+                    "Position update failed for %s",
+                    symbol
                 )
 
     def get_summary(self):
 
+        positions = self._get_positions()
+
         reserved = sum(
-            float(position["allocation"])
-            for position in self.positions.values()
+            float(p.get("allocation", 0))
+            for p in positions
+            if valid_number(p.get("allocation", 0))
         )
 
-        unrealized = 0.0
-        positions_data = []
+        unrealized_pnl = sum(
+            float(p.get("unrealized_pnl", 0))
+            for p in positions
+            if valid_number(p.get("unrealized_pnl", 0))
+        )
 
-        for symbol, position in self.positions.items():
-
-            price = self.last_prices.get(
-                symbol,
-                float(position["entry_price"])
-            )
-
-            quantity = float(position["quantity"])
-
-            entry_price = float(position["entry_price"])
-
-            entry_fee = float(position["entry_fee"])
-
-            exit_fee_estimate = (
-                price * quantity * FEE_RATE
-            )
-
-            gross = (price - entry_price) * quantity
-
-            net = gross - entry_fee - exit_fee_estimate
-
-            unrealized += net
-
-            positions_data.append({
-                **position,
-                "symbol": symbol,
-                "current_price": price,
-                "unrealized_pnl": net
-            })
-
-        estimated_equity = (
+        equity = (
             self.balance
             + reserved
-            + sum(
-                (
-                    float(self.last_prices.get(
-                        symbol,
-                        float(position["entry_price"])
-                    ))
-                    - float(position["entry_price"])
-                ) * float(position["quantity"])
-                - float(self.last_prices.get(
-                    symbol,
-                    float(position["entry_price"])
-                )) * float(position["quantity"]) * FEE_RATE
-                for symbol, position in self.positions.items()
-            )
+            + unrealized_pnl
         )
 
-        total_trades = self.wins + self.losses
+        trades = self.db.get_recent_trades(1000)
+
+        closed_count = len(trades)
+
+        winning_trades = sum(
+            1
+            for trade in trades
+            if valid_number(trade.get("net_pnl"))
+            and float(trade["net_pnl"]) > 0
+        )
 
         win_rate = (
-            self.wins / total_trades * 100
-            if total_trades
+            winning_trades / closed_count * 100
+            if closed_count
             else 0.0
         )
 
         return {
             "balance": self.balance,
-            "reserved": reserved,
+            "equity": equity,
             "realized_pnl": self.realized_pnl,
-            "unrealized_pnl": unrealized,
-            "equity": estimated_equity,
-            "wins": self.wins,
-            "losses": self.losses,
-            "total_trades": total_trades,
-            "win_rate": win_rate,
-            "positions": positions_data
+            "unrealized_pnl": unrealized_pnl,
+            "reserved": reserved,
+            "positions": positions,
+            "win_rate": win_rate
         }
