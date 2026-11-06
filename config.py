@@ -281,6 +281,7 @@ def validate_config():
         errors.append("MIN_QUOTE_VOLUME cannot be negative.")
     
         if not isinstance(SYMBOLS, list) or not SYMBOLS:
+            if not isinstance(SYMBOLS, list) or not SYMBOLS:
         errors.append("SYMBOLS must be a non-empty list.")
     else:
         if not all(isinstance(s, str) for s in SYMBOLS):
@@ -302,7 +303,6 @@ def validate_config():
                     errors.append(
                         f"Invalid trading symbol: {symbol!r}"
                     )
-
     # --------------------------------------------------------
     # ENGINE
     # --------------------------------------------------------
