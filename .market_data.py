@@ -286,10 +286,11 @@ class MarketData:
                 return None
 
             return {
-                "symbol": symbol,
-                "ticker": ticker,
-                "candles": candles
-            }
+    "symbol": symbol,
+    "ticker": ticker,
+    "candles": candles,
+    "klines": candles
+}
 
         except (
             aiohttp.ClientError,
