@@ -357,7 +357,7 @@ if (
         try:
 
             snapshot = await self.market.get_market_snapshot(
-                "BTCUSDT"
+                "BTC-USDT"
             )
 
             if not isinstance(snapshot, dict):
