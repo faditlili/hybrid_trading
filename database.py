@@ -77,7 +77,10 @@ class Database:
                 self._create_tables()
                 self._migrate()
 
-            logger.info("Database initialized: %s", self.db_path)
+            logger.info(
+                "Database initialized: %s",
+                self.db_path,
+            )
 
         except Exception:
             if self.conn is not None:
@@ -361,7 +364,9 @@ class Database:
                         "Invalid position data found for %s",
                         item.get("symbol"),
                     )
-                    raise RuntimeError("Invalid position data in database")
+                    raise RuntimeError(
+                        "Invalid position data in database"
+                    )
 
                 results.append({
                     "symbol": item["symbol"],
@@ -421,7 +426,10 @@ class Database:
         ):
             return False
 
-        if not close_enough(quantity * entry_price, allocation):
+        if not close_enough(
+            quantity * entry_price,
+            allocation,
+        ):
             return False
 
         opened_at = position.get("opened_at") or utc_timestamp()
@@ -468,7 +476,10 @@ class Database:
 
                     expected_balance = max(0.0, expected_balance)
 
-                    if not close_enough(new_balance, expected_balance):
+                    if not close_enough(
+                        new_balance,
+                        expected_balance,
+                    ):
                         raise sqlite3.IntegrityError(
                             "New balance calculation mismatch"
                         )
@@ -516,7 +527,9 @@ class Database:
                 return True
 
             except sqlite3.Error:
-                logger.exception("Failed to open paper position")
+                logger.exception(
+                    "Failed to open paper position"
+                )
                 return False
 
     def close_position_atomic(
@@ -647,12 +660,18 @@ class Database:
                         expected_gross - entry_fee - exit_fee
                     )
 
-                    if not close_enough(gross_pnl, expected_gross):
+                    if not close_enough(
+                        gross_pnl,
+                        expected_gross,
+                    ):
                         raise sqlite3.IntegrityError(
                             "Gross PnL mismatch"
                         )
 
-                    if not close_enough(net_pnl, expected_net):
+                    if not close_enough(
+                        net_pnl,
+                        expected_net,
+                    ):
                         raise sqlite3.IntegrityError(
                             "Net PnL mismatch"
                         )
@@ -671,7 +690,9 @@ class Database:
                         )
 
                     current_balance = safe_float(account["balance"])
-                    current_realized = safe_float(account["realized_pnl"])
+                    current_realized = safe_float(
+                        account["realized_pnl"]
+                    )
 
                     if (
                         current_balance is None
@@ -697,7 +718,10 @@ class Database:
 
                     expected_balance = max(0.0, expected_balance)
 
-                    if not close_enough(new_balance, expected_balance):
+                    if not close_enough(
+                        new_balance,
+                        expected_balance,
+                    ):
                         raise sqlite3.IntegrityError(
                             "New balance calculation mismatch"
                         )
@@ -777,7 +801,9 @@ class Database:
                 return True
 
             except sqlite3.Error:
-                logger.exception("Failed to close paper position")
+                logger.exception(
+                    "Failed to close paper position"
+                )
                 return False
 
     def log_decision(self, *args, **kwargs):
@@ -913,6 +939,52 @@ class Database:
 
             return [dict(row) for row in rows]
 
+    def get_trade_statistics(self):
+
+        with self.lock:
+            self._ensure_open()
+
+            row = self.conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS total_trades,
+                    COALESCE(SUM(
+                        CASE WHEN net_pnl > 0 THEN 1 ELSE 0 END
+                    ), 0) AS winning_trades,
+                    COALESCE(SUM(
+                        CASE WHEN net_pnl < 0 THEN 1 ELSE 0 END
+                    ), 0) AS losing_trades,
+                    COALESCE(SUM(net_pnl), 0) AS total_net_pnl,
+                    COALESCE(SUM(gross_pnl), 0) AS total_gross_pnl,
+                    COALESCE(SUM(entry_fee + exit_fee), 0) AS total_fees
+                FROM trades
+                """
+            ).fetchone()
+
+            total = int(row["total_trades"] or 0)
+            wins = int(row["winning_trades"] or 0)
+            losses = int(row["losing_trades"] or 0)
+
+            return {
+                "total_trades": total,
+                "winning_trades": wins,
+                "losing_trades": losses,
+                "breakeven_trades": total - wins - losses,
+                "win_rate": (
+                    wins / total * 100.0
+                    if total else 0.0
+                ),
+                "total_net_pnl": safe_float(
+                    row["total_net_pnl"], 0.0
+                ),
+                "total_gross_pnl": safe_float(
+                    row["total_gross_pnl"], 0.0
+                ),
+                "total_fees": safe_float(
+                    row["total_fees"], 0.0
+                ),
+            }
+
     def log_event(self, level, message):
 
         try:
@@ -981,4 +1053,6 @@ class Database:
                 self.conn.close()
                 self.conn = None
 
-                logger.info("Database connection closed")
+                logger.info(
+                    "Database connection closed"
+                )
