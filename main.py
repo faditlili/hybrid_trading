@@ -81,9 +81,9 @@ def add_ai_dialogue(message: str):
 async def fetch_aggregated_crypto_news_feeds():
     """Asynchronously parses headlines securely from open official RSS aggregator channels."""
     feed_urls = [
-        "https://cointelegraph.com/rss"٫
-        "http://coindesk.com/arc/outboundfeeds/rss/"
-     ]
+    "https://cointelegraph.com/rss",
+    "https://www.coindesk.com/arc/outboundfeeds/rss/"
+]
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     aggregated_headlines = []
     async with aiohttp.ClientSession() as session:
