@@ -1,6 +1,6 @@
 import math
 import os
-from pathlib import Path
+from urllib.parse import urlparse
 
 
 # ============================================================
@@ -10,8 +10,7 @@ from pathlib import Path
 APP_NAME = "AI QUANT"
 APP_VERSION = "3.1.0"
 
-# This project is permanently restricted to paper trading.
-# No real order execution is implemented or authorized here.
+# Permanently restricted to simulated trading.
 PAPER_MODE = True
 
 
@@ -19,11 +18,11 @@ PAPER_MODE = True
 # SERVER
 # ============================================================
 
-HOST = os.getenv("HOST", "0.0.0.0")
+HOST = os.getenv("HOST", "0.0.0.0").strip()
 
 try:
     PORT = int(os.getenv("PORT", "7860"))
-except ValueError:
+except (TypeError, ValueError, OverflowError):
     PORT = 7860
 
 
@@ -31,7 +30,7 @@ except ValueError:
 # DATABASE
 # ============================================================
 
-DB_PATH = os.getenv("DB_PATH", "ai_quant.db")
+DB_PATH = os.getenv("DB_PATH", "ai_quant.db").strip()
 
 
 # ============================================================
@@ -40,10 +39,10 @@ DB_PATH = os.getenv("DB_PATH", "ai_quant.db")
 
 BINANCE_BASE_URL = os.getenv(
     "BINANCE_BASE_URL",
-    "https://api.binance.com"
-).rstrip("/")
+    "https://api.binance.com",
+).strip().rstrip("/")
 
-TIMEFRAME = os.getenv("TIMEFRAME", "15m")
+TIMEFRAME = os.getenv("TIMEFRAME", "15m").strip()
 
 KLINE_LIMIT = 200
 
@@ -98,7 +97,7 @@ HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
 
 HF_API_URL = os.getenv(
     "HF_API_URL",
-    "https://router.huggingface.co/v1/chat/completions"
+    "https://router.huggingface.co/v1/chat/completions",
 ).strip()
 
 HF_MODELS = [
@@ -108,6 +107,9 @@ HF_MODELS = [
 ]
 
 AI_REQUEST_TIMEOUT_SECONDS = 30
+
+# Compatibility alias for older code.
+HF_TIMEOUT = AI_REQUEST_TIMEOUT_SECONDS
 
 AI_MAX_CONCURRENT_REQUESTS = 3
 
@@ -133,12 +135,12 @@ NEWS_REQUEST_TIMEOUT_SECONDS = 15
 
 TELEGRAM_TOKEN = os.getenv(
     "TELEGRAM_TOKEN",
-    ""
+    "",
 ).strip()
 
 _telegram_admin = os.getenv(
     "TELEGRAM_ADMIN_ID",
-    ""
+    "",
 ).strip()
 
 try:
@@ -147,7 +149,7 @@ try:
         if _telegram_admin
         else None
     )
-except ValueError:
+except (TypeError, ValueError, OverflowError):
     TELEGRAM_ADMIN_ID = None
 
 
@@ -168,105 +170,88 @@ HTTP_RETRY_ATTEMPTS = 2
 # LOGGING
 # ============================================================
 
-LOG_LEVEL = os.getenv(
-    "LOG_LEVEL",
-    "INFO"
-).upper()
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").strip().upper()
 
 
 # ============================================================
-# CONFIGURATION VALIDATION
+# VALIDATION HELPERS
 # ============================================================
 
 def _is_finite_number(value):
+    if isinstance(value, bool):
+        return False
+
     try:
         return math.isfinite(float(value))
     except (TypeError, ValueError, OverflowError):
         return False
 
 
+def _valid_https_url(value):
+    try:
+        parsed = urlparse(value)
+
+        return (
+            parsed.scheme == "https"
+            and bool(parsed.netloc)
+            and bool(parsed.hostname)
+            and parsed.username is None
+            and parsed.password is None
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+# ============================================================
+# CONFIGURATION VALIDATION
+# ============================================================
+
 def validate_config():
-    """
-    Validate application configuration before startup.
-
-    Raises:
-        ValueError: If an invalid configuration is detected.
-    """
-
     errors = []
 
-    if not PAPER_MODE:
-        errors.append(
-            "PAPER_MODE must remain True."
-        )
+    # --------------------------------------------------------
+    # SAFETY
+    # --------------------------------------------------------
 
-    if not isinstance(PORT, int) or not 1 <= PORT <= 65535:
+    if PAPER_MODE is not True:
+        errors.append("PAPER_MODE must remain True.")
+
+    # --------------------------------------------------------
+    # SERVER
+    # --------------------------------------------------------
+
+    if not isinstance(HOST, str) or not HOST:
+        errors.append("HOST must be a non-empty string.")
+
+    if (
+        isinstance(PORT, bool)
+        or not isinstance(PORT, int)
+        or not 1 <= PORT <= 65535
+    ):
         errors.append("PORT must be between 1 and 65535.")
 
-    if not isinstance(SCAN_INTERVAL_SECONDS, int):
-        errors.append("SCAN_INTERVAL_SECONDS must be an integer.")
-    elif SCAN_INTERVAL_SECONDS <= 0:
-        errors.append("SCAN_INTERVAL_SECONDS must be positive.")
+    # --------------------------------------------------------
+    # DATABASE
+    # --------------------------------------------------------
 
-    if not isinstance(MAX_SCAN_DURATION_SECONDS, int):
-        errors.append("MAX_SCAN_DURATION_SECONDS must be an integer.")
-    elif MAX_SCAN_DURATION_SECONDS <= 0:
-        errors.append("MAX_SCAN_DURATION_SECONDS must be positive.")
+    if not isinstance(DB_PATH, str) or not DB_PATH:
+        errors.append("DB_PATH must be a non-empty string.")
 
-    if not isinstance(MAX_OPEN_POSITIONS, int):
-        errors.append("MAX_OPEN_POSITIONS must be an integer.")
-    elif MAX_OPEN_POSITIONS < 1:
-        errors.append("MAX_OPEN_POSITIONS must be at least 1.")
+    # --------------------------------------------------------
+    # MARKET DATA
+    # --------------------------------------------------------
 
-    if not isinstance(MIN_SCORE_TO_ENTER, int):
-        errors.append("MIN_SCORE_TO_ENTER must be an integer.")
-    elif not 0 <= MIN_SCORE_TO_ENTER <= 100:
-        errors.append("MIN_SCORE_TO_ENTER must be between 0 and 100.")
+    if not _valid_https_url(BINANCE_BASE_URL):
+        errors.append("BINANCE_BASE_URL must be a valid HTTPS URL.")
 
-    if not _is_finite_number(INITIAL_BALANCE):
-        errors.append("INITIAL_BALANCE must be finite.")
-    elif INITIAL_BALANCE <= 0:
-        errors.append("INITIAL_BALANCE must be positive.")
+    if not isinstance(TIMEFRAME, str) or not TIMEFRAME:
+        errors.append("TIMEFRAME must be a non-empty string.")
 
-    if not _is_finite_number(RISK_PER_TRADE_PCT):
-        errors.append("RISK_PER_TRADE_PCT must be finite.")
-    elif not 0 < RISK_PER_TRADE_PCT <= 0.01:
-        errors.append(
-            "RISK_PER_TRADE_PCT must be greater than 0 and at most 0.01."
-        )
-
-    if not _is_finite_number(MAX_ALLOCATION_PCT):
-        errors.append("MAX_ALLOCATION_PCT must be finite.")
-    elif not 0 < MAX_ALLOCATION_PCT <= 1:
-        errors.append(
-            "MAX_ALLOCATION_PCT must be greater than 0 and at most 1."
-        )
-
-    if not _is_finite_number(FEE_RATE):
-        errors.append("FEE_RATE must be finite.")
-    elif not 0 <= FEE_RATE < 1:
-        errors.append("FEE_RATE must be between 0 and 1.")
-
-    if not _is_finite_number(SIMULATED_SLIPPAGE_BPS):
-        errors.append("SIMULATED_SLIPPAGE_BPS must be finite.")
-    elif not 0 <= SIMULATED_SLIPPAGE_BPS < 10000:
-        errors.append(
-            "SIMULATED_SLIPPAGE_BPS must be between 0 and 10000."
-        )
-
-    if not _is_finite_number(STOP_ATR_MULTIPLIER):
-        errors.append("STOP_ATR_MULTIPLIER must be finite.")
-    elif STOP_ATR_MULTIPLIER <= 0:
-        errors.append("STOP_ATR_MULTIPLIER must be positive.")
-
-    if not _is_finite_number(TARGET_R_MULTIPLIER):
-        errors.append("TARGET_R_MULTIPLIER must be finite.")
-    elif TARGET_R_MULTIPLIER <= 0:
-        errors.append("TARGET_R_MULTIPLIER must be positive.")
-
-    if not isinstance(KLINE_LIMIT, int):
-        errors.append("KLINE_LIMIT must be an integer.")
-    elif KLINE_LIMIT < 60 or KLINE_LIMIT > 1000:
+    if (
+        isinstance(KLINE_LIMIT, bool)
+        or not isinstance(KLINE_LIMIT, int)
+        or not 60 <= KLINE_LIMIT <= 1000
+    ):
         errors.append("KLINE_LIMIT must be between 60 and 1000.")
 
     if not _is_finite_number(MIN_QUOTE_VOLUME):
@@ -274,42 +259,172 @@ def validate_config():
     elif MIN_QUOTE_VOLUME < 0:
         errors.append("MIN_QUOTE_VOLUME cannot be negative.")
 
-    if not SYMBOLS:
-        errors.append("SYMBOLS cannot be empty.")
+    if not isinstance(SYMBOLS, list) or not SYMBOLS:
+        errors.append("SYMBOLS must be a non-empty list.")
+    else:
+        if len(SYMBOLS) != len(set(SYMBOLS)):
+            errors.append("SYMBOLS contains duplicate entries.")
 
-    if len(SYMBOLS) != len(set(SYMBOLS)):
-        errors.append("SYMBOLS contains duplicate entries.")
+        for symbol in SYMBOLS:
+            if (
+                not isinstance(symbol, str)
+                or not symbol
+                or symbol != symbol.upper()
+                or not symbol.isalnum()
+            ):
+                errors.append(f"Invalid trading symbol: {symbol!r}")
 
-    for symbol in SYMBOLS:
-        if (
-            not isinstance(symbol, str)
-            or not symbol
-            or symbol != symbol.upper()
-        ):
-            errors.append(
-                f"Invalid trading symbol: {symbol!r}"
-            )
+    # --------------------------------------------------------
+    # ENGINE
+    # --------------------------------------------------------
 
-    if not BINANCE_BASE_URL.startswith("https://"):
-        errors.append("BINANCE_BASE_URL must use HTTPS.")
+    integer_settings = {
+        "SCAN_INTERVAL_SECONDS": SCAN_INTERVAL_SECONDS,
+        "MAX_SCAN_DURATION_SECONDS": MAX_SCAN_DURATION_SECONDS,
+        "MAX_OPEN_POSITIONS": MAX_OPEN_POSITIONS,
+        "MIN_SCORE_TO_ENTER": MIN_SCORE_TO_ENTER,
+    }
 
-    if not DB_PATH:
-        errors.append("DB_PATH cannot be empty.")
+    for name, value in integer_settings.items():
+        if isinstance(value, bool) or not isinstance(value, int):
+            errors.append(f"{name} must be an integer.")
 
-    if AI_MIN_VALID_MODELS < 1:
+    if isinstance(SCAN_INTERVAL_SECONDS, int) and SCAN_INTERVAL_SECONDS <= 0:
+        errors.append("SCAN_INTERVAL_SECONDS must be positive.")
+
+    if isinstance(MAX_SCAN_DURATION_SECONDS, int) and MAX_SCAN_DURATION_SECONDS <= 0:
+        errors.append("MAX_SCAN_DURATION_SECONDS must be positive.")
+
+    if isinstance(MAX_OPEN_POSITIONS, int) and MAX_OPEN_POSITIONS < 1:
+        errors.append("MAX_OPEN_POSITIONS must be at least 1.")
+
+    if isinstance(MIN_SCORE_TO_ENTER, int) and not 0 <= MIN_SCORE_TO_ENTER <= 100:
+        errors.append("MIN_SCORE_TO_ENTER must be between 0 and 100.")
+
+    # --------------------------------------------------------
+    # PAPER ACCOUNT
+    # --------------------------------------------------------
+
+    numeric_settings = {
+        "INITIAL_BALANCE": INITIAL_BALANCE,
+        "RISK_PER_TRADE_PCT": RISK_PER_TRADE_PCT,
+        "MAX_ALLOCATION_PCT": MAX_ALLOCATION_PCT,
+        "FEE_RATE": FEE_RATE,
+        "SIMULATED_SLIPPAGE_BPS": SIMULATED_SLIPPAGE_BPS,
+        "STOP_ATR_MULTIPLIER": STOP_ATR_MULTIPLIER,
+        "TARGET_R_MULTIPLIER": TARGET_R_MULTIPLIER,
+    }
+
+    for name, value in numeric_settings.items():
+        if not _is_finite_number(value):
+            errors.append(f"{name} must be a finite number.")
+
+    if _is_finite_number(INITIAL_BALANCE) and INITIAL_BALANCE <= 0:
+        errors.append("INITIAL_BALANCE must be positive.")
+
+    if _is_finite_number(RISK_PER_TRADE_PCT):
+        if not 0 < RISK_PER_TRADE_PCT <= 0.01:
+            errors.append("RISK_PER_TRADE_PCT must be in (0, 0.01].")
+
+    if _is_finite_number(MAX_ALLOCATION_PCT):
+        if not 0 < MAX_ALLOCATION_PCT <= 1:
+            errors.append("MAX_ALLOCATION_PCT must be in (0, 1].")
+
+    if _is_finite_number(FEE_RATE):
+        if not 0 <= FEE_RATE < 1:
+            errors.append("FEE_RATE must be in [0, 1).")
+
+    if _is_finite_number(SIMULATED_SLIPPAGE_BPS):
+        if not 0 <= SIMULATED_SLIPPAGE_BPS < 10000:
+            errors.append("SIMULATED_SLIPPAGE_BPS must be in [0, 10000).")
+
+    if _is_finite_number(STOP_ATR_MULTIPLIER):
+        if STOP_ATR_MULTIPLIER <= 0:
+            errors.append("STOP_ATR_MULTIPLIER must be positive.")
+
+    if _is_finite_number(TARGET_R_MULTIPLIER):
+        if TARGET_R_MULTIPLIER <= 0:
+            errors.append("TARGET_R_MULTIPLIER must be positive.")
+
+    # --------------------------------------------------------
+    # AI COUNCIL
+    # --------------------------------------------------------
+
+    if not _valid_https_url(HF_API_URL):
+        errors.append("HF_API_URL must be a valid HTTPS URL.")
+
+    if (
+        isinstance(AI_REQUEST_TIMEOUT_SECONDS, bool)
+        or not isinstance(AI_REQUEST_TIMEOUT_SECONDS, (int, float))
+        or not _is_finite_number(AI_REQUEST_TIMEOUT_SECONDS)
+        or AI_REQUEST_TIMEOUT_SECONDS <= 0
+    ):
+        errors.append("AI_REQUEST_TIMEOUT_SECONDS must be positive.")
+
+    if (
+        isinstance(AI_MAX_CONCURRENT_REQUESTS, bool)
+        or not isinstance(AI_MAX_CONCURRENT_REQUESTS, int)
+        or AI_MAX_CONCURRENT_REQUESTS < 1
+    ):
+        errors.append("AI_MAX_CONCURRENT_REQUESTS must be at least 1.")
+
+    if (
+        isinstance(AI_MIN_VALID_MODELS, bool)
+        or not isinstance(AI_MIN_VALID_MODELS, int)
+        or AI_MIN_VALID_MODELS < 1
+    ):
         errors.append("AI_MIN_VALID_MODELS must be at least 1.")
 
     if not _is_finite_number(AI_MIN_AGREEMENT_RATIO):
         errors.append("AI_MIN_AGREEMENT_RATIO must be finite.")
     elif not 0.5 < AI_MIN_AGREEMENT_RATIO <= 1:
-        errors.append(
-            "AI_MIN_AGREEMENT_RATIO must be greater than 0.5 and at most 1."
-        )
+        errors.append("AI_MIN_AGREEMENT_RATIO must be in (0.5, 1].")
 
-    if AI_MAX_CONCURRENT_REQUESTS < 1:
-        errors.append(
-            "AI_MAX_CONCURRENT_REQUESTS must be at least 1."
-        )
+    # --------------------------------------------------------
+    # NEWS
+    # --------------------------------------------------------
+
+    if NEWS_REFRESH_SECONDS <= 0:
+        errors.append("NEWS_REFRESH_SECONDS must be positive.")
+
+    if NEWS_MAX_ITEMS < 1:
+        errors.append("NEWS_MAX_ITEMS must be at least 1.")
+
+    if NEWS_REQUEST_TIMEOUT_SECONDS <= 0:
+        errors.append("NEWS_REQUEST_TIMEOUT_SECONDS must be positive.")
+
+    # --------------------------------------------------------
+    # HTTP
+    # --------------------------------------------------------
+
+    if HTTP_TIMEOUT_SECONDS <= 0:
+        errors.append("HTTP_TIMEOUT_SECONDS must be positive.")
+
+    if HTTP_CONNECT_TIMEOUT_SECONDS <= 0:
+        errors.append("HTTP_CONNECT_TIMEOUT_SECONDS must be positive.")
+
+    if HTTP_MAX_CONNECTIONS < 1:
+        errors.append("HTTP_MAX_CONNECTIONS must be at least 1.")
+
+    if HTTP_RETRY_ATTEMPTS < 0:
+        errors.append("HTTP_RETRY_ATTEMPTS cannot be negative.")
+
+    # --------------------------------------------------------
+    # LOGGING
+    # --------------------------------------------------------
+
+    if LOG_LEVEL not in {
+        "CRITICAL",
+        "ERROR",
+        "WARNING",
+        "INFO",
+        "DEBUG",
+    }:
+        errors.append("LOG_LEVEL is invalid.")
+
+    # --------------------------------------------------------
+    # RESULT
+    # --------------------------------------------------------
 
     if errors:
         raise ValueError(
