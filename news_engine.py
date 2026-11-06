@@ -7,9 +7,15 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from html import unescape
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
 import aiohttp
+
+from config import (
+    NEWS_REFRESH_SECONDS,
+    NEWS_MAX_ITEMS,
+    NEWS_REQUEST_TIMEOUT_SECONDS,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -17,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 FEED_URLS = [
     "https://cointelegraph.com/rss",
-    "https://www.coindesk.com/arc/outboundfeeds/rss/"
+    "https://www.coindesk.com/arc/outboundfeeds/rss/",
 ]
 
 
@@ -30,21 +36,34 @@ class NewsEngine:
         self.latest_news = []
 
         self.lock = asyncio.Lock()
-
-        # Prevent concurrent get_news calls from
-        # triggering duplicate refreshes.
         self.refresh_lock = asyncio.Lock()
 
         self.last_fetch = 0.0
         self.last_attempt = 0.0
 
-        self.fetch_interval = 300
+        self.fetch_interval = max(
+            30,
+            int(NEWS_REFRESH_SECONDS)
+        )
 
-        self.request_timeout = 15
+        self.request_timeout = max(
+            3,
+            int(NEWS_REQUEST_TIMEOUT_SECONDS)
+        )
+
         self.max_feed_size = 2 * 1024 * 1024
 
-        self.max_items_per_feed = 30
-        self.max_total_items = 60
+        self.max_items_per_feed = min(
+            30,
+            max(1, int(NEWS_MAX_ITEMS))
+        )
+
+        self.max_total_items = max(
+            1,
+            int(NEWS_MAX_ITEMS)
+        )
+
+        self.retry_cooldown = 30
 
         self.available = False
 
@@ -56,7 +75,7 @@ class NewsEngine:
 
         timeout = aiohttp.ClientTimeout(
             total=self.request_timeout,
-            connect=8
+            connect=min(8, self.request_timeout)
         )
 
         connector = aiohttp.TCPConnector(
@@ -70,7 +89,7 @@ class NewsEngine:
                 timeout=timeout,
                 connector=connector,
                 headers={
-                    "User-Agent": "AI-QUANT/3.0",
+                    "User-Agent": "AI-QUANT/3.1",
                     "Accept": (
                         "application/rss+xml, "
                         "application/atom+xml, "
@@ -95,11 +114,23 @@ class NewsEngine:
 
     async def close(self):
 
-        if self.session and not self.session.closed:
-            await self.session.close()
+        async with self.lock:
 
-        self.session = None
-        self.available = False
+            session = self.session
+
+            self.session = None
+            self.available = False
+
+            if session and not session.closed:
+
+                try:
+                    await session.close()
+
+                except Exception:
+
+                    logger.exception(
+                        "News session close failed"
+                    )
 
         logger.info("News engine stopped")
 
@@ -109,8 +140,7 @@ class NewsEngine:
         if text is None:
             return ""
 
-        text = str(text)
-        text = unescape(text)
+        text = unescape(str(text))
 
         text = re.sub(
             r"<[^>]*>",
@@ -156,6 +186,12 @@ class NewsEngine:
             if parsed.username or parsed.password:
                 return ""
 
+            if any(
+                char.isspace()
+                for char in parsed.netloc
+            ):
+                return ""
+
             return urlunparse(parsed)
 
         except (ValueError, TypeError):
@@ -183,6 +219,7 @@ class NewsEngine:
                 date = parsedate_to_datetime(value)
 
             if date.tzinfo is None:
+
                 date = date.replace(
                     tzinfo=timezone.utc
                 )
@@ -212,6 +249,7 @@ class NewsEngine:
             )
 
             if date.tzinfo is None:
+
                 date = date.replace(
                     tzinfo=timezone.utc
                 )
@@ -341,7 +379,14 @@ class NewsEngine:
                 if link:
                     break
 
-            link = self.valid_url(link)
+            if link:
+
+                link = urljoin(
+                    source_url,
+                    link.strip()
+                )
+
+                link = self.valid_url(link)
 
             description_element = self.get_child(
                 item,
@@ -349,7 +394,7 @@ class NewsEngine:
                     "description",
                     "summary",
                     "content",
-                    "encoded"
+                    "encoded",
                 }
             )
 
@@ -365,7 +410,7 @@ class NewsEngine:
                     "pubdate",
                     "published",
                     "updated",
-                    "date"
+                    "date",
                 }
             )
 
@@ -387,7 +432,7 @@ class NewsEngine:
 
                 "published": published,
 
-                "source": source_url
+                "source": source_url,
 
             })
 
@@ -395,17 +440,17 @@ class NewsEngine:
 
     async def _fetch_feed_result(self, url):
 
-        if (
-            not self.session
-            or self.session.closed
-        ):
+        session = self.session
+
+        if not session or session.closed:
             return False, []
 
         try:
 
-            async with self.session.get(
+            async with session.get(
                 url,
-                allow_redirects=True
+                allow_redirects=True,
+                max_redirects=5
             ) as response:
 
                 if response.status != 200:
@@ -413,6 +458,18 @@ class NewsEngine:
                     logger.warning(
                         "RSS source returned HTTP %s",
                         response.status
+                    )
+
+                    return False, []
+
+                final_url = self.valid_url(
+                    str(response.url)
+                )
+
+                if not final_url:
+
+                    logger.warning(
+                        "RSS source returned an invalid final URL"
                     )
 
                     return False, []
@@ -448,8 +505,6 @@ class NewsEngine:
                     encoding,
                     errors="replace"
                 )
-
-                final_url = str(response.url)
 
             root = ET.fromstring(content)
 
@@ -506,10 +561,9 @@ class NewsEngine:
 
         async with self.lock:
 
-            if (
-                not self.session
-                or self.session.closed
-            ):
+            session = self.session
+
+            if not session or session.closed:
 
                 self.available = False
 
@@ -555,11 +609,13 @@ class NewsEngine:
                 success, news = result
 
                 if success:
+
                     successful_sources += 1
                     combined.extend(news)
 
-            # Preserve previous news if all feeds fail.
             if successful_sources == 0:
+
+                self.available = False
 
                 logger.warning(
                     "All RSS sources failed; "
@@ -572,10 +628,8 @@ class NewsEngine:
 
             for item in combined:
 
-                title = item.get("title", "")
-
                 normalized_title = self.normalize_title(
-                    title
+                    item.get("title", "")
                 )
 
                 if not normalized_title:
@@ -633,25 +687,21 @@ class NewsEngine:
             min(limit, self.max_total_items)
         )
 
-        # Serialize callers and recheck freshness after
-        # acquiring the lock. This prevents duplicate fetches.
         async with self.refresh_lock:
 
             now = time.monotonic()
 
             should_fetch = (
-                not self.latest_news
-                or now - self.last_fetch >= self.fetch_interval
+                now - self.last_fetch >= self.fetch_interval
             )
 
-            if should_fetch:
+            retry_blocked = (
+                self.last_attempt > 0
+                and now - self.last_attempt < self.retry_cooldown
+            )
 
-                retry_blocked = (
-                    self.latest_news
-                    and now - self.last_attempt < 30
-                )
+            if should_fetch and not retry_blocked:
 
-                if not retry_blocked:
-                    await self.fetch_all()
+                await self.fetch_all()
 
             return self.latest_news[:limit]
