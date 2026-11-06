@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 import math
 
@@ -25,8 +26,15 @@ from decision_engine import (
 logger = logging.getLogger(__name__)
 
 
+# ============================================================
+# HELPERS
+# ============================================================
+
 def utc_timestamp():
-    return datetime.now(timezone.utc).isoformat()
+
+    return datetime.now(
+        timezone.utc
+    ).isoformat()
 
 
 def valid_number(value):
@@ -64,13 +72,20 @@ def safe_reasons(value):
         if reason is None:
             continue
 
-        reasons.append(str(reason)[:300])
+        try:
+            reasons.append(str(reason)[:300])
+        except Exception:
+            continue
 
         if len(reasons) >= 20:
             break
 
     return reasons or ["No explanation provided"]
 
+
+# ============================================================
+# TRADING ENGINE
+# ============================================================
 
 class TradingEngine:
 
@@ -133,7 +148,7 @@ class TradingEngine:
 
             if not valid_number(value):
                 raise ValueError(
-                    f"{name} must be a valid finite number"
+                    f"{name} must be finite"
                 )
 
         self.scan_interval = float(
@@ -179,14 +194,17 @@ class TradingEngine:
 
             if not isinstance(symbol, str):
                 raise ValueError(
-                    "Every symbol must be a string"
+                    "Invalid symbol type"
                 )
 
             symbol = symbol.strip().upper()
 
-            if not symbol:
+            if (
+                not symbol
+                or not symbol.isalnum()
+            ):
                 raise ValueError(
-                    "SYMBOLS contains an empty symbol"
+                    f"Invalid symbol: {symbol!r}"
                 )
 
             if symbol in normalized:
@@ -202,15 +220,39 @@ class TradingEngine:
     # LIFECYCLE
     # ========================================================
 
+    async def _call_lifecycle(self, component, method_name):
+
+        method = getattr(
+            component,
+            method_name,
+            None,
+        )
+
+        if not callable(method):
+            raise RuntimeError(
+                f"{type(component).__name__} "
+                f"has no callable {method_name}()"
+            )
+
+        result = method()
+
+        if inspect.isawaitable(result):
+            await result
+
     async def start(self):
 
         async with self.lifecycle_lock:
 
             if self.running:
                 logger.warning(
-                    "Trading engine is already running"
+                    "Trading engine already running"
                 )
                 return
+
+            if self._started_components:
+                raise RuntimeError(
+                    "Previous component lifecycle was not fully cleared"
+                )
 
             logger.info(
                 "Starting AI QUANT in PAPER mode"
@@ -226,7 +268,10 @@ class TradingEngine:
 
                 for component in components:
 
-                    await component.start()
+                    await self._call_lifecycle(
+                        component,
+                        "start",
+                    )
 
                     self._started_components.append(
                         component
@@ -241,7 +286,7 @@ class TradingEngine:
             except BaseException:
 
                 logger.exception(
-                    "Engine startup failed. Rolling back components"
+                    "Engine startup failed"
                 )
 
                 self.running = False
@@ -262,7 +307,16 @@ class TradingEngine:
 
             try:
 
-                await component.close()
+                await self._call_lifecycle(
+                    component,
+                    "close",
+                )
+
+            except asyncio.CancelledError:
+                logger.warning(
+                    "Component shutdown cancelled: %s",
+                    type(component).__name__,
+                )
 
             except Exception:
 
@@ -277,7 +331,7 @@ class TradingEngine:
 
             self.running = False
 
-            # Wait for an active scan before closing dependencies.
+            # Wait for active scan before closing dependencies.
 
             async with self.scan_lock:
 
@@ -392,6 +446,7 @@ class TradingEngine:
             "score": safe_float(score),
             "ai_vote": str(ai_vote),
             "reasons": safe_reasons(reasons),
+            "timestamp": utc_timestamp(),
         }
 
         self.last_decisions.append(result)
@@ -490,14 +545,17 @@ class TradingEngine:
 
             candles = snapshot.get("klines")
 
-            if not isinstance(candles, pd.DataFrame):
+            if (
+                not isinstance(candles, pd.DataFrame)
+                or candles.empty
+            ):
 
                 self.record_decision(
                     symbol,
                     "WAIT",
                     0,
                     "UNAVAILABLE",
-                    ["Invalid candle data: DataFrame required"],
+                    ["Invalid candle data"],
                 )
 
                 stats["rejected"] += 1
@@ -519,8 +577,6 @@ class TradingEngine:
 
                 stats["rejected"] += 1
                 return
-
-            # Technical evaluation
 
             technical = calculate_technical_score(
                 indicators,
@@ -593,8 +649,6 @@ class TradingEngine:
                 stats["rejected"] += 1
                 return
 
-            # Prepare AI context.
-
             ai_context = {
                 "symbol": symbol,
                 "market_regime": self.market_regime,
@@ -614,8 +668,6 @@ class TradingEngine:
                     "reason": "Invalid AI response",
                 }
 
-            # Final decision.
-
             decision = evaluate_setup(
                 indicators,
                 self.market_regime,
@@ -625,7 +677,7 @@ class TradingEngine:
 
             if not isinstance(decision, dict):
                 raise ValueError(
-                    "Decision engine returned an invalid result"
+                    "Invalid decision engine response"
                 )
 
             action = decision.get(
@@ -649,16 +701,13 @@ class TradingEngine:
             ai_vote = str(
                 decision.get(
                     "ai_vote",
-                    "UNAVAILABLE"
+                    "UNAVAILABLE",
                 )
             ).strip().upper()
 
             reasons = safe_reasons(
                 decision.get("reasons", [])
             )
-
-            # Independent final safety checks.
-            # Both AI approval and minimum score are required.
 
             approved = (
                 action == "PAPER_BUY"
@@ -682,7 +731,7 @@ class TradingEngine:
                     action = "WAIT"
 
                     reasons.append(
-                        "Invalid price or ATR for paper trading"
+                        "Invalid price or ATR"
                     )
 
                     stats["rejected"] += 1
@@ -718,7 +767,7 @@ class TradingEngine:
                 if decision.get("action") == "PAPER_BUY":
 
                     reasons.append(
-                        "Entry blocked by independent safety validation"
+                        "Entry blocked by safety validation"
                     )
 
             self.record_decision(
@@ -756,7 +805,7 @@ class TradingEngine:
 
     async def _run_scan_cycle(self, stats):
 
-        # Update existing simulated positions.
+        # Update simulated positions first.
 
         await self.trader.update_positions(
             self.market
@@ -764,8 +813,6 @@ class TradingEngine:
 
         if not self.running:
             return "STOPPED"
-
-        # Determine BTC market regime.
 
         self.market_regime = (
             await self.get_market_regime()
@@ -776,11 +823,7 @@ class TradingEngine:
             self.market_regime,
         )
 
-        # Collect recent news.
-
         news_context = await self._get_news_context()
-
-        # Scan configured symbols.
 
         for symbol in self.symbols:
 
