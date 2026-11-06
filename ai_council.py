@@ -1,47 +1,41 @@
 import asyncio
-import aiohttp
 import logging
 import re
 
+import aiohttp
+
 from config import (
     HF_TOKEN,
-    HF_CHAT_COMPLETIONS_URL,
-    HF_AI_TIMEOUT,
-    HF_QWEN_MODEL,
-    HF_DEEPSEEK_MODEL,
-    HF_LLAMA_MODEL
+    HF_API_URL,
+    HF_TIMEOUT,
+    HF_MODELS
 )
+
 
 logger = logging.getLogger(__name__)
 
 
 class AICouncil:
 
-    VALID_VOTES = {"BUY", "SELL", "HOLD"}
-
     def __init__(self):
 
         self.session = None
-
-        self.models = list(dict.fromkeys([
-            HF_QWEN_MODEL,
-            HF_DEEPSEEK_MODEL,
-            HF_LLAMA_MODEL
-        ]))
+        self.available = False
+        self.model_status = {}
 
     async def start(self):
 
         if not HF_TOKEN:
+
             logger.warning(
                 "Hugging Face token is not configured"
             )
-            return
 
-        if self.session and not self.session.closed:
+            self.available = False
             return
 
         timeout = aiohttp.ClientTimeout(
-            total=HF_AI_TIMEOUT
+            total=HF_TIMEOUT
         )
 
         self.session = aiohttp.ClientSession(
@@ -52,44 +46,62 @@ class AICouncil:
             }
         )
 
+        self.available = True
+
+        logger.info("AI Council started")
+
     async def close(self):
 
         if self.session and not self.session.closed:
+
             await self.session.close()
 
         self.session = None
+        self.available = False
 
     def extract_vote(self, response):
 
-        if not isinstance(response, str):
-            return "UNAVAILABLE"
+        if not response:
+            return "INVALID"
 
-        text = response.strip().upper()
+        text = str(response).strip().upper()
 
-        match = re.fullmatch(
-            r"(BUY|SELL|HOLD)[.!]?",
+        match = re.search(
+            r"\b(BUY|SELL|HOLD)\b",
             text
         )
 
         if not match:
-            return "UNAVAILABLE"
+            return "INVALID"
 
         return match.group(1)
 
-    async def ask_model(self, model, market_data):
+    async def ask_model(self, model, context):
 
-        if not self.session or self.session.closed:
-            return "UNAVAILABLE"
+        if not self.session:
 
-        prompt = (
-            "You are an educational market-analysis assistant "
-            "for a paper-trading simulator. "
-            "Analyze the supplied technical indicators only. "
-            "Do not promise returns. "
-            "Do not give personalized investment advice. "
-            "Return exactly one label: BUY, SELL, or HOLD.\n\n"
-            f"Market data:\n{market_data}"
-        )
+            return {
+                "model": model,
+                "vote": "UNAVAILABLE",
+                "reason": "AI session unavailable"
+            }
+
+        prompt = f"""
+You are an analytical assistant in a paper-trading
+simulation.
+
+Evaluate the supplied market indicators.
+
+Return exactly one word:
+BUY
+SELL
+HOLD
+
+Do not provide financial promises.
+
+Market data:
+{context}
+"""
 
         payload = {
             "model": model,
@@ -97,8 +109,8 @@ class AICouncil:
                 {
                     "role": "system",
                     "content": (
-                        "Analyze indicators cautiously. "
-                        "Return exactly one word: BUY, SELL, or HOLD."
+                        "You are a cautious market-analysis "
+                        "assistant. Return one valid vote only."
                     )
                 },
                 {
@@ -107,116 +119,173 @@ class AICouncil:
                 }
             ],
             "temperature": 0.1,
-            "max_tokens": 10
+            "max_tokens": 30
         }
 
         try:
 
             async with self.session.post(
-                HF_CHAT_COMPLETIONS_URL,
+                HF_API_URL,
                 json=payload
             ) as response:
 
                 if response.status != 200:
 
-                    body = await response.text()
+                    error_text = await response.text()
 
                     logger.warning(
-                        "AI model %s returned HTTP %s: %s",
+                        "Model %s returned HTTP %s",
                         model,
-                        response.status,
-                        body[:200]
+                        response.status
                     )
 
-                    return "UNAVAILABLE"
+                    return {
+                        "model": model,
+                        "vote": "UNAVAILABLE",
+                        "reason": (
+                            f"HTTP {response.status}: "
+                            f"{error_text[:150]}"
+                        )
+                    }
 
                 data = await response.json()
 
-                choices = data.get("choices", [])
+                content = (
+                    data.get("choices", [{}])[0]
+                    .get("message", {})
+                    .get("content", "")
+                )
 
-                if not choices or not isinstance(choices, list):
-                    return "UNAVAILABLE"
+                vote = self.extract_vote(content)
 
-                message = choices[0].get("message", {})
+                return {
+                    "model": model,
+                    "vote": vote,
+                    "reason": str(content)[:200]
+                }
 
-                if not isinstance(message, dict):
-                    return "UNAVAILABLE"
+        except asyncio.TimeoutError:
 
-                content = message.get("content", "")
-
-                return self.extract_vote(content)
+            return {
+                "model": model,
+                "vote": "UNAVAILABLE",
+                "reason": "Request timeout"
+            }
 
         except (
             aiohttp.ClientError,
-            asyncio.TimeoutError,
+            ValueError,
             KeyError,
             IndexError,
-            ValueError,
             TypeError
-        ) as exc:
+        ) as error:
 
             logger.warning(
-                "AI model request failed (%s): %s",
-                model,
-                str(exc)[:200]
+                "AI model request failed: %s",
+                error
             )
 
-            return "UNAVAILABLE"
+            return {
+                "model": model,
+                "vote": "UNAVAILABLE",
+                "reason": str(error)[:200]
+            }
 
-    async def analyze(self, market_data):
+    async def analyze(self, context):
 
-        if not self.session or self.session.closed:
+        if not self.session:
+
             return {
                 "vote": "UNAVAILABLE",
+                "reason": "AI session not initialized",
                 "votes": {},
                 "available_models": 0
             }
 
+        if not isinstance(context, dict):
+
+            return {
+                "vote": "UNAVAILABLE",
+                "reason": "Invalid analysis context",
+                "votes": {},
+                "available_models": 0
+            }
+
+        tasks = [
+            self.ask_model(model, context)
+            for model in HF_MODELS
+        ]
+
         results = await asyncio.gather(
-            *[
-                self.ask_model(model, market_data)
-                for model in self.models
-            ],
+            *tasks,
             return_exceptions=True
         )
 
-        votes = {}
+        votes = {
+            "BUY": 0,
+            "SELL": 0,
+            "HOLD": 0
+        }
 
-        for model, result in zip(self.models, results):
+        details = []
+        available_models = 0
+
+        for result in results:
 
             if isinstance(result, Exception):
-                votes[model] = "UNAVAILABLE"
-            else:
-                votes[model] = (
-                    result
-                    if result in self.VALID_VOTES
-                    else "UNAVAILABLE"
-                )
 
-        valid_votes = [
-            vote
-            for vote in votes.values()
-            if vote in self.VALID_VOTES
-        ]
+                details.append({
+                    "vote": "UNAVAILABLE",
+                    "reason": str(result)[:150]
+                })
 
-        buy_count = valid_votes.count("BUY")
-        sell_count = valid_votes.count("SELL")
-        hold_count = valid_votes.count("HOLD")
+                continue
 
-        if buy_count >= 2:
+            details.append(result)
+
+            vote = result.get("vote")
+
+            if vote in votes:
+
+                votes[vote] += 1
+                available_models += 1
+
+        self.model_status = details
+
+        # Require at least two valid model responses
+        if available_models < 2:
+
+            return {
+                "vote": "UNAVAILABLE",
+                "reason": (
+                    "Not enough valid AI model responses"
+                ),
+                "votes": votes,
+                "available_models": available_models,
+                "details": details
+            }
+
+        # Require a majority of all configured models
+        if votes["BUY"] >= 2:
+
             final_vote = "BUY"
 
-        elif sell_count >= 2:
+        elif votes["SELL"] >= 2:
+
             final_vote = "SELL"
 
-        elif hold_count >= 2:
+        elif votes["HOLD"] >= 2:
+
             final_vote = "HOLD"
 
         else:
+
             final_vote = "UNAVAILABLE"
 
         return {
             "vote": final_vote,
+            "reason": "AI council voting completed",
             "votes": votes,
-            "available_models": len(valid_votes)
+            "available_models": available_models,
+            "details": details
         }
