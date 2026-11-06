@@ -1,8 +1,12 @@
 import os
 import asyncio
 import logging
+
+import uvicorn
 import gradio as gr
 
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from fastapi import FastAPI
 
 from database import Database
@@ -11,18 +15,19 @@ from ai_council import AICouncil
 from news_engine import NewsEngine
 from paper_trading import PaperTrader
 from engine import TradingEngine
-from dashboard import create_dashboard
+from dashboard import build_dashboard
 from telegram_bot import TelegramController
 
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 )
 
 logger = logging.getLogger("AI_QUANT")
 
 
+# إنشاء الخدمات
 db = Database()
 
 market = MarketData()
@@ -31,118 +36,174 @@ news = NewsEngine()
 
 trader = PaperTrader(db)
 
-controller = TradingEngine(
-    market_data=market,
-    ai_council=ai,
-    news_engine=news,
+engine = TradingEngine(
+    market=market,
+    ai=ai,
+    news=news,
     trader=trader,
-    database=db
+    db=db
 )
 
-telegram = TelegramController(controller)
-
-app = FastAPI(title="AI QUANT")
-
-dashboard = create_dashboard(controller)
-
-app = gr.mount_gradio_app(
-    app,
-    dashboard,
-    path="/"
+telegram = TelegramController(
+    engine=engine,
+    trader=trader
 )
 
+# واجهة موحدة للوحة التحكم
+controller = SimpleNamespace(
+    engine=engine,
+    trader=trader,
+    db=db
+)
 
-@app.on_event("startup")
-async def startup_event():
+scanner_task = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+
+    global scanner_task
 
     logger.info("Starting AI QUANT")
 
     try:
 
-        await controller.start()
+        await engine.start()
+
+        scanner_task = asyncio.create_task(
+            engine.run_forever(),
+            name="ai-quant-scanner"
+        )
 
         try:
             await telegram.start()
 
-        except Exception as exc:
-
-            logger.error(
-                "Telegram startup failed: %s",
-                exc
+        except Exception:
+            logger.exception(
+                "Telegram startup failed; dashboard remains available"
             )
-
-        app.state.scanner_task = asyncio.create_task(
-            controller.run_forever()
-        )
 
         logger.info("AI QUANT started successfully")
 
-    except Exception as exc:
+        yield
 
-        logger.exception(
-            "AI QUANT startup failed: %s",
-            exc
-        )
+    finally:
+
+        logger.info("Stopping AI QUANT")
+
+        engine.stop()
+
+        if scanner_task:
+
+            scanner_task.cancel()
+
+            try:
+                await scanner_task
+
+            except asyncio.CancelledError:
+                pass
+
+            except Exception:
+                logger.exception(
+                    "Scanner shutdown failed"
+                )
+
+            scanner_task = None
 
         try:
-            await controller.close()
+            await telegram.close()
 
         except Exception:
-            logger.exception("Resource cleanup failed")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-
-    logger.info("Stopping AI QUANT")
-
-    controller.stop()
-
-    task = getattr(
-        app.state,
-        "scanner_task",
-        None
-    )
-
-    if task:
-
-        task.cancel()
+            logger.exception(
+                "Telegram shutdown failed"
+            )
 
         try:
-            await task
+            await engine.close()
 
-        except asyncio.CancelledError:
-            pass
+        except Exception:
+            logger.exception(
+                "Engine shutdown failed"
+            )
 
-    await telegram.stop()
+        try:
+            db.close()
 
-    await controller.close()
+        except Exception:
+            logger.exception(
+                "Database shutdown failed"
+            )
 
-    db.close()
+        logger.info("AI QUANT stopped")
+
+
+app = FastAPI(
+    title="AI QUANT",
+    description="Automated paper-trading simulation",
+    version="2.0",
+    lifespan=lifespan
+)
 
 
 @app.get("/health")
 async def health():
 
+    scanner_running = (
+        scanner_task is not None
+        and not scanner_task.done()
+    )
+
     return {
-        "status": "online",
         "system": "AI QUANT",
-        "mode": "PAPER_TRADING_ONLY",
-        "scanner_running": controller.running,
-        "last_scan": controller.last_scan
+        "status": (
+            "ONLINE"
+            if scanner_running
+            else "DEGRADED"
+        ),
+        "paper_trading_only": True,
+        "scanner_running": scanner_running,
+        "market_regime": engine.market_regime,
+        "last_scan": engine.last_scan,
+        "last_error": engine.last_error
     }
+
+
+@app.get("/api/status")
+async def api_status():
+
+    summary = trader.get_summary()
+
+    return {
+        "mode": "PAPER ONLY",
+        "balance": summary["balance"],
+        "equity": summary["equity"],
+        "realized_pnl": summary["realized_pnl"],
+        "unrealized_pnl": summary["unrealized_pnl"],
+        "open_positions": len(summary["positions"]),
+        "market_regime": engine.market_regime,
+        "last_scan": engine.last_scan
+    }
+
+
+# إنشاء واجهة Gradio
+demo = build_dashboard(controller)
+
+app = gr.mount_gradio_app(
+    app,
+    demo,
+    path="/"
+)
 
 
 if __name__ == "__main__":
 
-    import uvicorn
-
     port = int(
-        os.getenv("PORT", "7860")
+        os.environ.get("PORT", 7860)
     )
 
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=port
+        port=port,
+        log_level="info"
     )
