@@ -26,7 +26,7 @@ STOP_ATR_MULTIPLIER = 1.8
 TARGET_R_MULTIPLIER = 2.0
 
 # Market data
-BINANCE_BASE_URL = "https://api.binance.com"
+BINANCE_BASE_URL = "https://data-api.binance.vision"
 
 TIMEFRAME = "15m"
 KLINE_LIMIT = 100
