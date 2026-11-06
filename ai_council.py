@@ -1,5 +1,7 @@
 import asyncio
+import json
 import logging
+import math
 import re
 
 import aiohttp
@@ -21,7 +23,9 @@ class AICouncil:
 
         self.session = None
         self.available = False
-        self.model_status = {}
+        self.model_status = []
+
+        self.single_model_min_score = 80
 
     async def start(self):
 
@@ -38,8 +42,14 @@ class AICouncil:
             total=HF_TIMEOUT
         )
 
+        connector = aiohttp.TCPConnector(
+            limit=10,
+            ttl_dns_cache=300
+        )
+
         self.session = aiohttp.ClientSession(
             timeout=timeout,
+            connector=connector,
             headers={
                 "Authorization": f"Bearer {HF_TOKEN}",
                 "Content-Type": "application/json"
@@ -59,26 +69,91 @@ class AICouncil:
         self.session = None
         self.available = False
 
-    def extract_vote(self, response):
+    @staticmethod
+    def extract_vote(response):
 
-        if not response:
+        if not isinstance(response, str):
+
             return "INVALID"
 
-        text = str(response).strip().upper()
+        text = response.strip().upper()
 
-        match = re.search(
-            r"\b(BUY|SELL|HOLD)\b",
+        text = re.sub(
+            r"^```(?:TEXT)?\s*|\s*```$",
+            "",
             text
-        )
+        ).strip()
 
-        if not match:
-            return "INVALID"
+        if re.fullmatch(
+            r"(BUY|SELL|HOLD)[.!]?",
+            text
+        ):
 
-        return match.group(1)
+            return re.sub(
+                r"[.!]",
+                "",
+                text
+            )
+
+        return "INVALID"
+
+    def build_prompt(self, context):
+
+        try:
+
+            market_data = json.dumps(
+                context,
+                ensure_ascii=False,
+                default=str
+            )
+
+        except (TypeError, ValueError):
+
+            market_data = str(context)
+
+        market_data = market_data[:6000]
+
+        return f"""
+You are an analytical assistant
+inside a PAPER TRADING simulation.
+
+Analyze the supplied market information.
+
+Consider:
+- Technical indicators
+- Market trend
+- Momentum
+- Trading volume
+- BTC market regime
+- Recent news
+- Potential risks
+
+Do not invent missing data.
+
+Return exactly ONE word:
+
+BUY
+SELL
+HOLD
+
+BUY means the setup appears suitable
+for further evaluation.
+
+SELL means the setup is unfavorable.
+
+HOLD means there is insufficient evidence.
+
+Market information:
+
+{market_data}
+"""
 
     async def ask_model(self, model, context):
 
-        if not self.session:
+        if (
+            not self.session
+            or self.session.closed
+        ):
 
             return {
                 "model": model,
@@ -86,31 +161,18 @@ class AICouncil:
                 "reason": "AI session unavailable"
             }
 
-        prompt = f"""
-You are an analytical assistant in a paper-trading
-simulation.
-
-Evaluate the supplied market indicators.
-
-Return exactly one word:
-BUY
-SELL
-HOLD
-
-Do not provide financial promises.
-
-Market data:
-{context}
-"""
+        prompt = self.build_prompt(context)
 
         payload = {
             "model": model,
+
             "messages": [
                 {
                     "role": "system",
                     "content": (
                         "You are a cautious market-analysis "
-                        "assistant. Return one valid vote only."
+                        "assistant. Return exactly one word: "
+                        "BUY, SELL, or HOLD."
                     )
                 },
                 {
@@ -118,8 +180,10 @@ Market data:
                     "content": prompt
                 }
             ],
-            "temperature": 0.1,
-            "max_tokens": 30
+
+            "temperature": 0,
+            "max_tokens": 5,
+            "stream": False
         }
 
         try:
@@ -134,7 +198,7 @@ Market data:
                     error_text = await response.text()
 
                     logger.warning(
-                        "Model %s returned HTTP %s",
+                        "Model %s HTTP %s",
                         model,
                         response.status
                     )
@@ -144,24 +208,57 @@ Market data:
                         "vote": "UNAVAILABLE",
                         "reason": (
                             f"HTTP {response.status}: "
-                            f"{error_text[:150]}"
+                            f"{error_text[:120]}"
                         )
                     }
 
                 data = await response.json()
 
-                content = (
-                    data.get("choices", [{}])[0]
-                    .get("message", {})
-                    .get("content", "")
+                choices = data.get(
+                    "choices",
+                    []
                 )
 
+                if not choices:
+
+                    return {
+                        "model": model,
+                        "vote": "UNAVAILABLE",
+                        "reason": "Empty model response"
+                    }
+
+                message = choices[0].get(
+                    "message",
+                    {}
+                )
+
+                content = message.get(
+                    "content",
+                    ""
+                )
+
+                if isinstance(content, list):
+
+                    content = " ".join(
+                        str(item.get("text", ""))
+                        for item in content
+                        if isinstance(item, dict)
+                    )
+
                 vote = self.extract_vote(content)
+
+                if vote == "INVALID":
+
+                    return {
+                        "model": model,
+                        "vote": "INVALID",
+                        "reason": "Invalid voting format"
+                    }
 
                 return {
                     "model": model,
                     "vote": vote,
-                    "reason": str(content)[:200]
+                    "reason": "Valid model response"
                 }
 
         except asyncio.TimeoutError:
@@ -181,25 +278,55 @@ Market data:
         ) as error:
 
             logger.warning(
-                "AI model request failed: %s",
+                "AI request failed for %s: %s",
+                model,
                 error
             )
 
             return {
                 "model": model,
                 "vote": "UNAVAILABLE",
-                "reason": str(error)[:200]
+                "reason": str(error)[:150]
             }
+
+    @staticmethod
+    def valid_score(context):
+
+        try:
+
+            score = float(
+                context.get("technical_score", 0)
+            )
+
+            if not math.isfinite(score):
+                return 0
+
+            return max(
+                0,
+                min(score, 100)
+            )
+
+        except (
+            TypeError,
+            ValueError,
+            AttributeError
+        ):
+
+            return 0
 
     async def analyze(self, context):
 
-        if not self.session:
+        if (
+            not self.session
+            or self.session.closed
+        ):
 
             return {
                 "vote": "UNAVAILABLE",
                 "reason": "AI session not initialized",
                 "votes": {},
-                "available_models": 0
+                "available_models": 0,
+                "details": []
             }
 
         if not isinstance(context, dict):
@@ -208,12 +335,27 @@ Market data:
                 "vote": "UNAVAILABLE",
                 "reason": "Invalid analysis context",
                 "votes": {},
-                "available_models": 0
+                "available_models": 0,
+                "details": []
+            }
+
+        models = list(
+            dict.fromkeys(HF_MODELS)
+        )
+
+        if not models:
+
+            return {
+                "vote": "UNAVAILABLE",
+                "reason": "No AI models configured",
+                "votes": {},
+                "available_models": 0,
+                "details": []
             }
 
         tasks = [
             self.ask_model(model, context)
-            for model in HF_MODELS
+            for model in models
         ]
 
         results = await asyncio.gather(
@@ -235,6 +377,7 @@ Market data:
             if isinstance(result, Exception):
 
                 details.append({
+                    "model": "UNKNOWN",
                     "vote": "UNAVAILABLE",
                     "reason": str(result)[:150]
                 })
@@ -252,40 +395,81 @@ Market data:
 
         self.model_status = details
 
-        # Require at least two valid model responses
-        if available_models < 2:
+        technical_score = self.valid_score(
+            context
+        )
 
-            return {
-                "vote": "UNAVAILABLE",
-                "reason": (
-                    "Not enough valid AI model responses"
-                ),
-                "votes": votes,
-                "available_models": available_models,
-                "details": details
-            }
+        final_vote = "UNAVAILABLE"
+        reason = "Insufficient AI agreement"
 
-        # Require a majority of all configured models
-        if votes["BUY"] >= 2:
+        # Two or more models are available
 
-            final_vote = "BUY"
+        if available_models >= 2:
 
-        elif votes["SELL"] >= 2:
+            if votes["BUY"] >= 2:
 
-            final_vote = "SELL"
+                final_vote = "BUY"
+                reason = "AI majority approved"
 
-        elif votes["HOLD"] >= 2:
+            elif votes["SELL"] >= 2:
 
-            final_vote = "HOLD"
+                final_vote = "SELL"
+                reason = "AI majority rejected"
 
-        else:
+            elif votes["HOLD"] >= 2:
 
-            final_vote = "UNAVAILABLE"
+                final_vote = "HOLD"
+                reason = "AI majority recommends waiting"
 
-        return {
+            else:
+
+                final_vote = "UNAVAILABLE"
+                reason = "AI models disagree"
+
+        # Single-model fallback
+
+        elif available_models == 1:
+
+            if (
+                votes["BUY"] == 1
+                and technical_score >= self.single_model_min_score
+            ):
+
+                final_vote = "BUY"
+
+                reason = (
+                    "Single AI approval with "
+                    "very strong technical score"
+                )
+
+            elif votes["SELL"] == 1:
+
+                final_vote = "SELL"
+                reason = "Available AI model rejected setup"
+
+            elif votes["HOLD"] == 1:
+
+                final_vote = "HOLD"
+                reason = "Available AI model recommends waiting"
+
+            else:
+
+                final_vote = "UNAVAILABLE"
+                reason = "Single AI approval insufficient"
+
+        result = {
             "vote": final_vote,
-            "reason": "AI council voting completed",
+            "reason": reason,
             "votes": votes,
             "available_models": available_models,
             "details": details
         }
+
+        logger.info(
+            "AI Council: %s | Models: %s | Votes: %s",
+            final_vote,
+            available_models,
+            votes
+        )
+
+        return result
