@@ -1,3 +1,4 @@
+
 import asyncio
 import aiohttp
 import logging
@@ -17,14 +18,17 @@ logger = logging.getLogger(__name__)
 
 class AICouncil:
 
+    VALID_VOTES = {"BUY", "SELL", "HOLD"}
+
     def __init__(self):
+
         self.session = None
 
-        self.models = [
+        self.models = list(dict.fromkeys([
             HF_QWEN_MODEL,
             HF_DEEPSEEK_MODEL,
             HF_LLAMA_MODEL
-        ]
+        ]))
 
     async def start(self):
 
@@ -54,15 +58,17 @@ class AICouncil:
         if self.session and not self.session.closed:
             await self.session.close()
 
+        self.session = None
+
     def extract_vote(self, response):
 
-        if not response:
+        if not isinstance(response, str):
             return "UNAVAILABLE"
 
-        text = str(response).upper()
+        text = response.strip().upper()
 
-        match = re.search(
-            r"\b(BUY|SELL|HOLD)\b",
+        match = re.fullmatch(
+            r"(BUY|SELL|HOLD)[.!]?",
             text
         )
 
@@ -92,8 +98,8 @@ class AICouncil:
                 {
                     "role": "system",
                     "content": (
-                        "You analyze market indicators cautiously. "
-                        "Your output must be exactly BUY, SELL, or HOLD."
+                        "Analyze indicators cautiously. "
+                        "Return exactly one word: BUY, SELL, or HOLD."
                     )
                 },
                 {
@@ -102,7 +108,7 @@ class AICouncil:
                 }
             ],
             "temperature": 0.1,
-            "max_tokens": 20
+            "max_tokens": 10
         }
 
         try:
@@ -127,11 +133,17 @@ class AICouncil:
 
                 data = await response.json()
 
-                content = (
-                    data.get("choices", [{}])[0]
-                    .get("message", {})
-                    .get("content", "")
-                )
+                choices = data.get("choices", [])
+
+                if not choices or not isinstance(choices, list):
+                    return "UNAVAILABLE"
+
+                message = choices[0].get("message", {})
+
+                if not isinstance(message, dict):
+                    return "UNAVAILABLE"
+
+                content = message.get("content", "")
 
                 return self.extract_vote(content)
 
@@ -140,7 +152,8 @@ class AICouncil:
             asyncio.TimeoutError,
             KeyError,
             IndexError,
-            ValueError
+            ValueError,
+            TypeError
         ) as exc:
 
             logger.warning(
@@ -175,16 +188,21 @@ class AICouncil:
             if isinstance(result, Exception):
                 votes[model] = "UNAVAILABLE"
             else:
-                votes[model] = result
+                votes[model] = (
+                    result
+                    if result in self.VALID_VOTES
+                    else "UNAVAILABLE"
+                )
 
         valid_votes = [
             vote
             for vote in votes.values()
-            if vote in ("BUY", "SELL", "HOLD")
+            if vote in self.VALID_VOTES
         ]
 
         buy_count = valid_votes.count("BUY")
         sell_count = valid_votes.count("SELL")
+        hold_count = valid_votes.count("HOLD")
 
         if buy_count >= 2:
             final_vote = "BUY"
@@ -192,7 +210,7 @@ class AICouncil:
         elif sell_count >= 2:
             final_vote = "SELL"
 
-        elif len(valid_votes) >= 2:
+        elif hold_count >= 2:
             final_vote = "HOLD"
 
         else:
