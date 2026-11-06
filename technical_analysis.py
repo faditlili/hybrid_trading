@@ -55,22 +55,36 @@ def calculate_indicators(df):
 
         if "close_time" in data.columns:
 
-            data["close_time"] = pd.to_numeric(
-                data["close_time"],
-                errors="coerce"
-            )
+    if pd.api.types.is_datetime64_any_dtype(
+        data["close_time"]
+    ):
 
-            data = data.dropna(
-                subset=["close_time"]
-            )
+        if data["close_time"].dt.tz is None:
+            data["close_time"] = data["close_time"].dt.tz_localize("UTC")
+        else:
+            data["close_time"] = data["close_time"].dt.tz_convert("UTC")
 
-            now_ms = pd.Timestamp.now(
-                tz="UTC"
-            ).timestamp() * 1000
+        else:
 
-            data = data[
-                data["close_time"] < now_ms
-            ]
+        close_time_numeric = pd.to_numeric(
+            data["close_time"],
+            errors="coerce"
+        )
+
+        data["close_time"] = pd.to_datetime(
+            close_time_numeric,
+            unit="ms",
+            utc=True,
+            errors="coerce"
+        )
+
+    data = data.dropna(subset=["close_time"])
+
+    now = pd.Timestamp.now(tz="UTC")
+
+    data = data[
+        data["close_time"] < now
+    ]
 
         else:
 
