@@ -1,5 +1,6 @@
 import math
 import logging
+import html
 
 import gradio as gr
 
@@ -8,73 +9,163 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# STYLE
+# MOBILE-FIRST STYLE
 # ============================================================
 
 CSS = """
-.gradio-container {
-    max-width: 1100px !important;
-    margin: auto !important;
-    background: #080d18 !important;
-    color: #e5f3ff !important;
+:root {
+    color-scheme: dark;
 }
 
-body {
+body,
+.gradio-container {
     background: #080d18 !important;
+    color: #e5edf9 !important;
+    font-family: Arial, sans-serif !important;
+}
+
+.gradio-container {
+    max-width: 1250px !important;
+    margin: auto !important;
+    padding: 12px !important;
 }
 
 #main-title {
+    color: #00e5ff !important;
     text-align: center;
-    color: #00e5ff;
-    font-size: 30px;
-    font-weight: 800;
+    font-size: 30px !important;
+    font-weight: 900 !important;
+    margin-bottom: 2px !important;
 }
 
 #subtitle {
+    color: #8495b5 !important;
     text-align: center;
-    color: #8195b5;
-    font-size: 13px;
-}
-
-.metric-card {
-    background: #101a2c;
-    border: 1px solid #1d3553;
-    border-radius: 14px;
-    padding: 14px;
+    font-size: 12px !important;
+    letter-spacing: 1px;
 }
 
 .section-title {
-    color: #00e5ff;
-    font-weight: 700;
-    font-size: 18px;
+    color: #00d9f5 !important;
+    font-size: 17px !important;
+    font-weight: 800 !important;
 }
 
-.status-text {
-    color: #00e5ff;
-    font-weight: 700;
+.status-card {
+    background: #101a2c;
+    border: 1px solid #203650;
+    border-radius: 14px;
+    padding: 13px;
+    min-height: 70px;
+}
+
+.metric-label {
+    color: #91a3bf;
+    font-size: 12px;
+    margin-bottom: 7px;
+}
+
+.metric-value {
+    color: #f1f7ff;
+    font-size: 22px;
+    font-weight: 800;
+    overflow-wrap: anywhere;
+}
+
+.metric-unit {
+    color: #8295b3;
+    font-size: 11px;
+}
+
+.market-good {
+    color: #30d99b;
+    font-weight: 800;
+}
+
+.market-bad {
+    color: #ff647c;
+    font-weight: 800;
+}
+
+.market-warning {
+    color: #ffc857;
+    font-weight: 800;
 }
 
 button.primary {
     background: #00bcd4 !important;
     color: #06111d !important;
     border: none !important;
+    font-weight: 800 !important;
 }
 
 button {
+    border-radius: 12px !important;
+    min-height: 44px !important;
+}
+
+.tabs {
+    border: 1px solid #1c304b !important;
+    border-radius: 14px !important;
+    background: #0d1727 !important;
+    padding: 8px !important;
+}
+
+.tab-nav button {
     border-radius: 10px !important;
+    font-size: 13px !important;
+}
+
+input,
+textarea,
+.gr-box,
+.gr-panel,
+table {
+    border-radius: 10px !important;
+}
+
+.gr-form,
+.gr-panel {
+    background: #101a2c !important;
+    border-color: #203650 !important;
 }
 
 footer {
     display: none !important;
 }
 
-@media (max-width: 650px) {
-    #main-title {
-        font-size: 23px;
+@media (max-width: 700px) {
+    .gradio-container {
+        padding: 7px !important;
     }
 
-    .metric-card {
-        padding: 9px;
+    #main-title {
+        font-size: 24px !important;
+    }
+
+    #subtitle {
+        font-size: 10px !important;
+    }
+
+    .metric-value {
+        font-size: 18px;
+    }
+
+    .metric-label {
+        font-size: 11px;
+    }
+
+    .tabs {
+        padding: 4px !important;
+    }
+
+    .tab-nav button {
+        font-size: 11px !important;
+        padding: 8px 5px !important;
+    }
+
+    button {
+        min-height: 46px !important;
     }
 }
 """
@@ -90,7 +181,6 @@ def safe_float(value, default=0.0):
         return float(default)
 
     try:
-
         result = float(value)
 
         if math.isfinite(result):
@@ -117,17 +207,11 @@ def safe_text(value, limit=500):
 def safe_call(function, default):
 
     try:
-
         result = function()
-
         return result if result is not None else default
 
     except Exception:
-
-        logger.exception(
-            "Dashboard data retrieval failed"
-        )
-
+        logger.exception("Dashboard data retrieval failed")
         return default
 
 
@@ -137,8 +221,7 @@ def safe_rows(value):
         return []
 
     return [
-        item
-        for item in value
+        item for item in value
         if isinstance(item, dict)
     ]
 
@@ -151,46 +234,129 @@ def money(value):
 def get_controller_components(controller):
 
     if controller is None:
-        raise RuntimeError(
-            "Dashboard controller is missing"
-        )
+        raise RuntimeError("Dashboard controller is missing")
 
-    engine = getattr(
-        controller,
-        "engine",
-        None
-    )
-
-    trader = getattr(
-        controller,
-        "trader",
-        None
-    )
+    engine = getattr(controller, "engine", None)
+    trader = getattr(controller, "trader", None)
 
     if engine is None:
-        raise RuntimeError(
-            "Trading engine is missing"
-        )
+        raise RuntimeError("Trading engine is missing")
 
     if trader is None:
-        raise RuntimeError(
-            "Paper trader is missing"
-        )
+        raise RuntimeError("Paper trader is missing")
 
-    db = getattr(
-        controller,
-        "db",
-        None
-    )
+    db = getattr(controller, "db", None)
 
     if db is None:
-        db = getattr(
-            engine,
-            "db",
-            None
-        )
+        db = getattr(engine, "db", None)
 
     return engine, trader, db
+
+
+def get_market_data_component(controller, engine):
+
+    market_data = getattr(
+        controller,
+        "market_data",
+        None,
+    )
+
+    if market_data is None:
+        market_data = getattr(
+            engine,
+            "market_data",
+            None,
+        )
+
+    if market_data is None:
+        market_data = getattr(
+            engine,
+            "market",
+            None,
+        )
+
+    return market_data
+
+
+def get_market_status(controller, engine):
+
+    market_data = get_market_data_component(
+        controller,
+        engine,
+    )
+
+    if market_data is None:
+        return (
+            "NOT CONNECTED",
+            "Market data component unavailable",
+            "No successful request recorded",
+        )
+
+    status_function = getattr(
+        market_data,
+        "get_status",
+        None,
+    )
+
+    if not callable(status_function):
+        return (
+            "UNKNOWN",
+            "Market data status method unavailable",
+            "Unknown",
+        )
+
+    data = safe_call(status_function, {})
+
+    if not isinstance(data, dict):
+        return (
+            "UNKNOWN",
+            "Invalid market data status",
+            "Unknown",
+        )
+
+    errors = data.get("last_errors", {})
+
+    if not isinstance(errors, dict):
+        errors = {}
+
+    error_messages = list(errors.values())
+
+    error_text = (
+        safe_text(error_messages[-1], 350)
+        if error_messages
+        else "No current market data errors"
+    )
+
+    last_success = data.get("last_success", {})
+
+    if isinstance(last_success, dict) and last_success:
+        success_text = safe_text(
+            list(last_success.values())[-1],
+            100,
+        )
+    else:
+        success_text = "No successful request recorded"
+
+    if "451" in error_text:
+        market_status = "RESTRICTED - HTTP 451"
+
+    elif "429" in error_text or "418" in error_text:
+        market_status = "RATE LIMITED"
+
+    elif not data.get("running", False):
+        market_status = "STOPPED"
+
+    elif error_messages:
+        market_status = "ERROR"
+
+    else:
+        market_status = "RUNNING"
+
+    return (
+        market_status,
+        error_text,
+        success_text,
+    )
 
 
 # ============================================================
@@ -200,41 +366,27 @@ def get_controller_components(controller):
 def get_dashboard(controller):
 
     try:
-
         engine, trader, db = get_controller_components(
             controller
         )
 
     except Exception:
-
         logger.exception(
             "Dashboard component initialization failed"
         )
 
         return (
-            money(0),
-            money(0),
-            money(0),
-            money(0),
-            money(0),
-            0,
-            "0.00%",
-            "ERROR",
-            "UNKNOWN",
-            "Unavailable",
+            money(0), money(0), money(0),
+            money(0), money(0), 0, "0.00%",
+            "ERROR", "UNKNOWN", "Unavailable",
             "Dashboard components unavailable",
-            0,
-            0,
-            0,
-            0,
-            [],
-            [],
-            [],
-            [],
+            "UNKNOWN", "Unavailable", "Unavailable",
+            0, 0, 0, 0,
+            [], [], [], [],
         )
 
     # --------------------------------------------------------
-    # ACCOUNT SUMMARY
+    # ACCOUNT
     # --------------------------------------------------------
 
     summary = safe_call(
@@ -247,22 +399,18 @@ def get_dashboard(controller):
     if not summary_valid:
         summary = {}
 
-    positions_data = summary.get(
-        "positions",
-        []
-    )
+    positions_data = summary.get("positions", [])
 
     if not isinstance(positions_data, list):
         positions_data = []
 
     positions_data = [
-        position
-        for position in positions_data
-        if isinstance(position, dict)
+        item for item in positions_data
+        if isinstance(item, dict)
     ]
 
     # --------------------------------------------------------
-    # DATABASE DATA
+    # DATABASE
     # --------------------------------------------------------
 
     database_error = False
@@ -292,15 +440,9 @@ def get_dashboard(controller):
             database_error = True
 
     else:
-
-        logger.error(
-            "Dashboard database reference is unavailable"
-        )
-
         decisions = []
         trades = []
         events = []
-
         database_error = True
 
     decisions = safe_rows(decisions)
@@ -308,60 +450,45 @@ def get_dashboard(controller):
     events = safe_rows(events)
 
     # --------------------------------------------------------
-    # ENGINE STATUS
+    # ENGINE
     # --------------------------------------------------------
 
-    stats = getattr(
-        engine,
-        "scan_stats",
-        {},
-    )
+    stats = getattr(engine, "scan_stats", {})
 
     if not isinstance(stats, dict):
         stats = {}
 
-    status = (
+    engine_status = (
         "RUNNING"
         if getattr(engine, "running", False)
         else "STOPPED"
     )
 
     regime = safe_text(
-        getattr(
-            engine,
-            "market_regime",
-            "UNKNOWN"
-        ),
+        getattr(engine, "market_regime", "UNKNOWN"),
         50,
     )
 
     last_scan = safe_text(
-        getattr(
-            engine,
-            "last_scan",
-            None
-        ) or "Not scanned yet",
+        getattr(engine, "last_scan", None)
+        or "Not scanned yet",
         100,
     )
 
     error = safe_text(
-        getattr(
-            engine,
-            "last_error",
-            None
-        ) or "No system errors",
+        getattr(engine, "last_error", None)
+        or "No system errors",
         500,
     )
 
-    if not summary_valid:
+    market_status, market_error, market_success = (
+        get_market_status(controller, engine)
+    )
 
-        error = (
-            "Account summary unavailable. "
-            "Check paper trader and database logs."
-        )
+    if not summary_valid:
+        error = "Account summary unavailable."
 
     elif database_error:
-
         error = (
             "Database data is partially unavailable. "
             + error
@@ -375,56 +502,21 @@ def get_dashboard(controller):
 
     for position in positions_data:
 
-        symbol = safe_text(
-            position.get("symbol", ""),
-            30,
-        )
-
         position_rows.append([
 
-            symbol,
+            safe_text(position.get("symbol", ""), 30),
 
-            round(
-                safe_float(
-                    position.get("entry_price")
-                ),
-                8,
-            ),
+            round(safe_float(position.get("entry_price")), 8),
 
-            round(
-                safe_float(
-                    position.get("current_price")
-                ),
-                8,
-            ),
+            round(safe_float(position.get("current_price")), 8),
 
-            round(
-                safe_float(
-                    position.get("quantity")
-                ),
-                8,
-            ),
+            round(safe_float(position.get("quantity")), 8),
 
-            round(
-                safe_float(
-                    position.get("unrealized_pnl")
-                ),
-                4,
-            ),
+            round(safe_float(position.get("unrealized_pnl")), 4),
 
-            round(
-                safe_float(
-                    position.get("stop_loss")
-                ),
-                8,
-            ),
+            round(safe_float(position.get("stop_loss")), 8),
 
-            round(
-                safe_float(
-                    position.get("take_profit")
-                ),
-                8,
-            ),
+            round(safe_float(position.get("take_profit")), 8),
 
         ])
 
@@ -436,52 +528,29 @@ def get_dashboard(controller):
 
     for decision in decisions:
 
-        reasons = decision.get(
-            "reasons",
-            ""
-        )
+        reasons = decision.get("reasons", "")
 
         if isinstance(reasons, (list, tuple)):
-
             reasons = " | ".join(
                 safe_text(item, 200)
                 for item in reasons
             )
-
         else:
-
-            reasons = safe_text(
-                reasons,
-                350,
-            )
+            reasons = safe_text(reasons, 350)
 
         decision_rows.append([
 
-            safe_text(
-                decision.get("symbol", ""),
-                30,
-            ),
+            safe_text(decision.get("symbol", ""), 30),
 
-            safe_text(
-                decision.get("action", ""),
-                30,
-            ),
+            safe_text(decision.get("action", ""), 30),
 
-            safe_float(
-                decision.get("score")
-            ),
+            safe_float(decision.get("score")),
 
-            safe_text(
-                decision.get("ai_vote", ""),
-                30,
-            ),
+            safe_text(decision.get("ai_vote", ""), 30),
 
             reasons[:350],
 
-            safe_text(
-                decision.get("timestamp", ""),
-                100,
-            ),
+            safe_text(decision.get("timestamp", ""), 100),
 
         ])
 
@@ -495,46 +564,22 @@ def get_dashboard(controller):
 
         trade_rows.append([
 
-            safe_text(
-                trade.get("symbol", ""),
-                30,
-            ),
+            safe_text(trade.get("symbol", ""), 30),
 
-            round(
-                safe_float(
-                    trade.get("entry_price")
-                ),
-                8,
-            ),
+            round(safe_float(trade.get("entry_price")), 8),
 
-            round(
-                safe_float(
-                    trade.get("exit_price")
-                ),
-                8,
-            ),
+            round(safe_float(trade.get("exit_price")), 8),
 
-            round(
-                safe_float(
-                    trade.get("net_pnl")
-                ),
-                4,
-            ),
+            round(safe_float(trade.get("net_pnl")), 4),
 
-            safe_text(
-                trade.get("reason", ""),
-                100,
-            ),
+            safe_text(trade.get("reason", ""), 100),
 
-            safe_text(
-                trade.get("timestamp", ""),
-                100,
-            ),
+            safe_text(trade.get("timestamp", ""), 100),
 
         ])
 
     # --------------------------------------------------------
-    # SYSTEM EVENTS
+    # EVENTS
     # --------------------------------------------------------
 
     event_rows = []
@@ -543,20 +588,11 @@ def get_dashboard(controller):
 
         event_rows.append([
 
-            safe_text(
-                event.get("level", ""),
-                30,
-            ),
+            safe_text(event.get("level", ""), 30),
 
-            safe_text(
-                event.get("message", ""),
-                500,
-            ),
+            safe_text(event.get("message", ""), 500),
 
-            safe_text(
-                event.get("timestamp", ""),
-                100,
-            ),
+            safe_text(event.get("timestamp", ""), 100),
 
         ])
 
@@ -567,41 +603,32 @@ def get_dashboard(controller):
     return (
 
         money(summary.get("balance")),
-
         money(summary.get("equity")),
-
         money(summary.get("realized_pnl")),
-
         money(summary.get("unrealized_pnl")),
-
         money(summary.get("reserved")),
 
         len(position_rows),
 
         f"{safe_float(summary.get('win_rate')):.2f}%",
 
-        status,
-
+        engine_status,
         regime,
-
         last_scan,
-
         error,
 
+        market_status,
+        market_error,
+        market_success,
+
         int(safe_float(stats.get("scanned"))),
-
         int(safe_float(stats.get("approved"))),
-
         int(safe_float(stats.get("rejected"))),
-
         int(safe_float(stats.get("errors"))),
 
         position_rows,
-
         decision_rows,
-
         trade_rows,
-
         event_rows,
 
     )
@@ -614,13 +641,11 @@ def get_dashboard(controller):
 async def force_scan(controller):
 
     try:
-
         engine, trader, db = get_controller_components(
             controller
         )
 
     except Exception:
-
         logger.exception(
             "Manual scan initialization failed"
         )
@@ -642,22 +667,18 @@ async def force_scan(controller):
         result = await engine.scan_once()
 
         if not isinstance(result, dict):
-
             message = "Invalid scan response."
 
         else:
 
-            status = result.get(
-                "status",
-                "UNKNOWN",
-            )
+            status = result.get("status", "UNKNOWN")
 
             messages = {
-                "COMPLETED": "Market scan completed successfully.",
+                "COMPLETED": "Market scan completed.",
                 "BUSY": "A scan is already running.",
-                "TIMEOUT": "Market scan exceeded its time limit.",
+                "TIMEOUT": "Market scan timed out.",
                 "ERROR": "Market scan failed.",
-                "STOPPED": "Engine stopped during the scan.",
+                "STOPPED": "Engine stopped during scan.",
                 "NOT_RUNNING": "Engine is not running.",
             }
 
@@ -666,16 +687,11 @@ async def force_scan(controller):
                 f"Scan status: {safe_text(status, 50)}",
             )
 
-            if status == "ERROR":
-
-                detail = result.get("message")
-
-                if detail:
-
-                    message += " " + safe_text(
-                        detail,
-                        250
-                    )
+            if status == "ERROR" and result.get("message"):
+                message += " " + safe_text(
+                    result.get("message"),
+                    250,
+                )
 
     except asyncio.CancelledError:
         raise
@@ -708,7 +724,15 @@ def build_dashboard(controller):
     with gr.Blocks(
         css=CSS,
         title="AI QUANT",
+        theme=gr.themes.Base(
+            primary_hue="cyan",
+            neutral_hue="slate",
+        ),
     ) as demo:
+
+        # ----------------------------------------------------
+        # HEADER
+        # ----------------------------------------------------
 
         gr.Markdown(
             "# AI QUANT",
@@ -716,18 +740,55 @@ def build_dashboard(controller):
         )
 
         gr.Markdown(
-            "AUTONOMOUS MARKET ANALYSIS | PAPER TRADING",
+            "INTELLIGENT MARKET ANALYSIS | PAPER TRADING",
             elem_id="subtitle",
         )
 
         gr.Markdown(
-            "SIMULATION MODE ONLY — NO REAL ORDERS",
-            elem_classes=["status-text"],
+            "**SIMULATION MODE ONLY — NO REAL ORDERS**",
+            elem_classes=["section-title"],
         )
 
         # ----------------------------------------------------
-        # ACCOUNT
+        # CONNECTION STATUS
         # ----------------------------------------------------
+
+        gr.Markdown(
+            "## SYSTEM STATUS",
+            elem_classes=["section-title"],
+        )
+
+        with gr.Row():
+
+            engine_status = gr.Textbox(
+                label="ENGINE",
+                interactive=False,
+            )
+
+            market_status = gr.Textbox(
+                label="MARKET DATA",
+                interactive=False,
+            )
+
+        market_error = gr.Textbox(
+            label="Market Data Diagnostics",
+            interactive=False,
+            lines=2,
+        )
+
+        market_success = gr.Textbox(
+            label="Last Successful Market Request",
+            interactive=False,
+        )
+
+        # ----------------------------------------------------
+        # ACCOUNT CARDS
+        # ----------------------------------------------------
+
+        gr.Markdown(
+            "## ACCOUNT OVERVIEW",
+            elem_classes=["section-title"],
+        )
 
         with gr.Row():
 
@@ -738,11 +799,6 @@ def build_dashboard(controller):
 
             equity = gr.Textbox(
                 label="Total Equity",
-                interactive=False,
-            )
-
-            reserved = gr.Textbox(
-                label="Reserved Capital",
                 interactive=False,
             )
 
@@ -758,35 +814,25 @@ def build_dashboard(controller):
                 interactive=False,
             )
 
+        with gr.Row():
+
+            reserved = gr.Textbox(
+                label="Reserved Capital",
+                interactive=False,
+            )
+
             win_rate = gr.Textbox(
                 label="Win Rate",
                 interactive=False,
             )
 
         # ----------------------------------------------------
-        # ENGINE STATUS
+        # MARKET SCANNER
         # ----------------------------------------------------
 
-        with gr.Row():
-
-            open_count = gr.Number(
-                label="Open Positions",
-                interactive=False,
-            )
-
-            status = gr.Textbox(
-                label="Engine Status",
-                interactive=False,
-            )
-
-            regime = gr.Textbox(
-                label="BTC Market Regime",
-                interactive=False,
-            )
-
-        last_scan = gr.Textbox(
-            label="Last Scan",
-            interactive=False,
+        gr.Markdown(
+            "## MARKET SCANNER",
+            elem_classes=["section-title"],
         )
 
         with gr.Row():
@@ -801,6 +847,8 @@ def build_dashboard(controller):
                 interactive=False,
             )
 
+        with gr.Row():
+
             rejected = gr.Number(
                 label="Rejected",
                 interactive=False,
@@ -811,13 +859,26 @@ def build_dashboard(controller):
                 interactive=False,
             )
 
+        with gr.Row():
+
+            regime = gr.Textbox(
+                label="BTC Market Regime",
+                interactive=False,
+            )
+
+            last_scan = gr.Textbox(
+                label="Last Scan",
+                interactive=False,
+            )
+
         system_error = gr.Textbox(
             label="System Diagnostics",
             interactive=False,
+            lines=2,
         )
 
         # ----------------------------------------------------
-        # MARKET CONTROL
+        # SCAN CONTROLS
         # ----------------------------------------------------
 
         gr.Markdown(
@@ -836,123 +897,130 @@ def build_dashboard(controller):
         )
 
         # ----------------------------------------------------
-        # OPEN POSITIONS
+        # TABS
         # ----------------------------------------------------
 
-        gr.Markdown(
-            "## OPEN PAPER POSITIONS",
-            elem_classes=["section-title"],
-        )
+        with gr.Tabs():
 
-        positions = gr.Dataframe(
-            headers=[
-                "Symbol",
-                "Entry",
-                "Current",
-                "Quantity",
-                "Unrealized PnL",
-                "Stop Loss",
-                "Take Profit",
-            ],
-            datatype=[
-                "str",
-                "number",
-                "number",
-                "number",
-                "number",
-                "number",
-                "number",
-            ],
-            interactive=False,
-        )
+            with gr.Tab("Positions"):
+
+                gr.Markdown(
+                    "### OPEN PAPER POSITIONS"
+                )
+
+                open_count = gr.Number(
+                    label="Open Positions",
+                    interactive=False,
+                )
+
+                positions = gr.Dataframe(
+                    headers=[
+                        "Symbol",
+                        "Entry",
+                        "Current",
+                        "Quantity",
+                        "Unrealized PnL",
+                        "Stop Loss",
+                        "Take Profit",
+                    ],
+                    datatype=[
+                        "str",
+                        "number",
+                        "number",
+                        "number",
+                        "number",
+                        "number",
+                        "number",
+                    ],
+                    interactive=False,
+                    wrap=True,
+                )
+
+            with gr.Tab("AI Decisions"):
+
+                gr.Markdown(
+                    "### AI DECISION HISTORY"
+                )
+
+                decisions = gr.Dataframe(
+                    headers=[
+                        "Symbol",
+                        "Action",
+                        "Score",
+                        "AI Vote",
+                        "Reasons",
+                        "Timestamp",
+                    ],
+                    datatype=[
+                        "str",
+                        "str",
+                        "number",
+                        "str",
+                        "str",
+                        "str",
+                    ],
+                    interactive=False,
+                    wrap=True,
+                )
+
+            with gr.Tab("Trade History"):
+
+                gr.Markdown(
+                    "### CLOSED PAPER TRADES"
+                )
+
+                trades = gr.Dataframe(
+                    headers=[
+                        "Symbol",
+                        "Entry",
+                        "Exit",
+                        "Net PnL",
+                        "Reason",
+                        "Timestamp",
+                    ],
+                    datatype=[
+                        "str",
+                        "number",
+                        "number",
+                        "number",
+                        "str",
+                        "str",
+                    ],
+                    interactive=False,
+                    wrap=True,
+                )
+
+            with gr.Tab("System Events"):
+
+                gr.Markdown(
+                    "### SYSTEM EVENTS"
+                )
+
+                events = gr.Dataframe(
+                    headers=[
+                        "Level",
+                        "Message",
+                        "Timestamp",
+                    ],
+                    datatype=[
+                        "str",
+                        "str",
+                        "str",
+                    ],
+                    interactive=False,
+                    wrap=True,
+                )
 
         # ----------------------------------------------------
-        # AI DECISIONS
+        # REFRESH
         # ----------------------------------------------------
-
-        gr.Markdown(
-            "## AI DECISION HISTORY",
-            elem_classes=["section-title"],
-        )
-
-        decisions = gr.Dataframe(
-            headers=[
-                "Symbol",
-                "Action",
-                "Score",
-                "AI Vote",
-                "Reasons",
-                "Timestamp",
-            ],
-            datatype=[
-                "str",
-                "str",
-                "number",
-                "str",
-                "str",
-                "str",
-            ],
-            interactive=False,
-        )
-
-        # ----------------------------------------------------
-        # CLOSED TRADES
-        # ----------------------------------------------------
-
-        gr.Markdown(
-            "## CLOSED PAPER TRADES",
-            elem_classes=["section-title"],
-        )
-
-        trades = gr.Dataframe(
-            headers=[
-                "Symbol",
-                "Entry",
-                "Exit",
-                "Net PnL",
-                "Reason",
-                "Timestamp",
-            ],
-            datatype=[
-                "str",
-                "number",
-                "number",
-                "number",
-                "str",
-                "str",
-            ],
-            interactive=False,
-        )
-
-        # ----------------------------------------------------
-        # EVENTS
-        # ----------------------------------------------------
-
-        gr.Markdown(
-            "## SYSTEM EVENTS",
-            elem_classes=["section-title"],
-        )
-
-        events = gr.Dataframe(
-            headers=[
-                "Level",
-                "Message",
-                "Timestamp",
-            ],
-            datatype=[
-                "str",
-                "str",
-                "str",
-            ],
-            interactive=False,
-        )
 
         refresh_button = gr.Button(
             "REFRESH DASHBOARD",
         )
 
         # ----------------------------------------------------
-        # OUTPUTS
+        # OUTPUT ORDER
         # ----------------------------------------------------
 
         outputs = [
@@ -966,10 +1034,14 @@ def build_dashboard(controller):
             open_count,
             win_rate,
 
-            status,
+            engine_status,
             regime,
             last_scan,
             system_error,
+
+            market_status,
+            market_error,
+            market_success,
 
             scanned,
             approved,
@@ -988,11 +1060,9 @@ def build_dashboard(controller):
         # ----------------------------------------------------
 
         async def run_manual_scan():
-
             return await force_scan(controller)
 
         def refresh_dashboard():
-
             return get_dashboard(controller)
 
         refresh_button.click(
@@ -1042,5 +1112,4 @@ def build_dashboard(controller):
 # ============================================================
 
 def create_dashboard(controller):
-
     return build_dashboard(controller)
