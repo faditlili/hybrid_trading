@@ -81,7 +81,7 @@ def add_ai_dialogue(message: str):
 async def fetch_aggregated_crypto_news_feeds():
     """Asynchronously parses headlines securely from open official RSS aggregator channels."""
     feed_urls = [
-        "https://cointelegraph.com/rss"
+        "https://cointelegraph.com/rss"٫
         "http://coindesk.com/arc/outboundfeeds/rss/"
      ]
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
@@ -140,30 +140,39 @@ async def model_agent_deepseek_auditor(headline: str) -> str:
     return "NEUTRAL"
 # Model Agent 3: Meta Llama 3.1 8B (Technical Momentum Confirmer)
 async def model_agent_llama_technical(symbol: str, rsi: float, change: float) -> str:
-    if not HF_TOKEN: return "NEUTRAL"
+    if not HF_TOKEN:
+        return "NEUTRAL"
+
     api_url = "https://api-inference.huggingface.co/models/meta-llama/Meta-Llama-3.1-8B-Instruct"
     headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
+
     prompt = (
         f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n"
         f"Classify this asset tech stats as EXACTLY one word: BUY, SELL, or HOLD. Do not type any preamble.<|eot_id|>\n"
         f"<|start_header_id|>user<|end_header_id|>\n"
         f"Asset {symbol}, RSI={rsi}, 24h Change={change}%<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n"
     )
-        try:
+
+    try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                api_url, 
-                json={"inputs": prompt, "parameters": {"max_new_tokens": 3, "temperature": 0.01}}, 
-                headers=headers, 
+                api_url,
+                json={"inputs": prompt, "parameters": {"max_new_tokens": 3, "temperature": 0.01}},
+                headers=headers,
                 timeout=6
             ) as res:
                 if res.status == 200:
                     data = await res.json()
-                if isinstance(data, list) and len(data) > 0:
-                    out = data[0].get("generated_text", "").strip().upper()
-                        if "BUY" in out: return "BUY"
-                        if "SELL" in out: return "SELL"
-    except Exception: pass
+                    if isinstance(data, list) and len(data) > 0:
+                        out = data[0].get("generated_text", "").strip().upper()
+                        if "BUY" in out:
+                            return "BUY"
+                        if "SELL" in out:
+                            return "SELL"
+
+    except Exception as e:
+        logger.error(f"Llama Agent Error: {str(e)}")
+
     return "HOLD"
 # --- Real-Market Price Ticker Ingestion & Metric Calculations ---
 async def execute_bitcoin_macro_safety_check():
@@ -210,7 +219,7 @@ async def monitor_and_manage_active_positions(live_market_pool: list, applicatio
     global wallet_balance, daily_profit, successful_trades, failed_trades
     live_prices = {x["symbol"]: x["price"] for x in live_market_pool}
     fee_pct = 0.001
-     for symbol in list(active_positions.keys()):
+    for symbol in list(active_positions.keys()):
         if symbol not in live_prices: continue
         pos = active_positions[symbol]
         current_price = live_prices[symbol]
@@ -229,7 +238,7 @@ async def monitor_and_manage_active_positions(live_market_pool: list, applicatio
                 successful_trades += 1
             elif current_price >= pos['sl']:
                 triggered, pnl, res_type = True, -pos['allocated'] * (pos['sl_pct'] / 100), "🛡️ Hard Stop-Loss Guard Triggered"
-                failed_trades +=         
+                failed_trades += 1         
         if triggered:
             net_pnl = round(pnl - (pos['allocated'] * fee_pct), 2)
             wallet_balance += net_pnl
@@ -366,7 +375,7 @@ with gr.Blocks(theme=gr.themes.Default(primary_hue="amber", secondary_hue="slate
     with gr.Row():
         wins_box = gr.Markdown(value="### 0 Targets Captured")
         loss_box = gr.Markdown(value="### 0 Protection Exits")
-        floating_box = gr.Markdown(value="`[ Hanging Open Allocations: None ]`"   
+        floating_box = gr.Markdown(value="`[ Hanging Open Allocations: None ]`")  
     refresh_btn = gr.Button("🔄 Force Refresh Live Console Data Matrices", variant="primary")
     ai_chat_view = gr.HTML(value="<div style='background-color: #0d1117; padding: 10px; height: 200px; overflow-y: auto; color: #ffb100;'>🤖 Standing by... waiting next data ingestion check cycle.</div>")
     log_area = gr.TextArea(label="Continuous Runtime Cloud Activities Logs Engine", value="", interactive=False, lines=4)
