@@ -9,7 +9,6 @@ import asyncio
 import inspect
 import logging
 import math
-
 from datetime import datetime, timezone
 
 import config
@@ -37,11 +36,14 @@ REQUIRED_TIMEFRAMES = ("15m", "1h", "4h")
 _configured_timeframes = getattr(
     config,
     "TIMEFRAMES",
-    getattr(config, "TIMEFRAME", "15m")
+    getattr(config, "TIMEFRAME", "15m"),
 )
 
 if isinstance(_configured_timeframes, str):
     _configured_timeframes = (_configured_timeframes,)
+
+if not isinstance(_configured_timeframes, (tuple, list)):
+    raise ValueError("Invalid TIMEFRAMES configuration")
 
 TIMEFRAMES = tuple(
     dict.fromkeys(
@@ -50,14 +52,34 @@ TIMEFRAMES = tuple(
     )
 )
 
+if not SYMBOLS:
+    raise ValueError("At least one trading symbol is required")
+
+if not TIMEFRAMES:
+    raise ValueError("At least one timeframe is required")
+
 SCAN_INTERVAL_SECONDS = max(
     60,
-    int(config.SCAN_INTERVAL_SECONDS)
+    int(config.SCAN_INTERVAL_SECONDS),
 )
 
 
 def utc_now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def valid_positive_number(value):
+    """Validate a positive finite numeric value."""
+
+    if isinstance(value, bool):
+        return False
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+    return math.isfinite(number) and number > 0
 
 
 # --------------------------------------------------
@@ -86,7 +108,7 @@ class TradingEngine:
         # Optional Telegram notifications.
         self.telegram = TelegramBot(
             db,
-            engine=self
+            engine=self,
         )
 
         # Runtime state.
@@ -97,7 +119,7 @@ class TradingEngine:
         self.last_error = None
         self.last_prices = {}
 
-        # Prevent overlapping scans and lifecycle operations.
+        # Prevent overlapping operations.
         self.scan_lock = asyncio.Lock()
         self.lifecycle_lock = asyncio.Lock()
 
@@ -111,7 +133,7 @@ class TradingEngine:
             self.db.log_event(
                 level,
                 str(message)[:1000],
-                utc_now()
+                utc_now(),
             )
 
         except Exception:
@@ -123,14 +145,11 @@ class TradingEngine:
 
         self.last_error = str(message)[:1000]
 
-        logger.error(
-            "%s",
-            self.last_error
-        )
+        logger.error("%s", self.last_error)
 
         self._log_event(
             "ERROR",
-            self.last_error
+            self.last_error,
         )
 
     # --------------------------------------------------
@@ -140,9 +159,9 @@ class TradingEngine:
     async def _send_telegram_notification(
         self,
         method_name,
-        payload
+        payload,
     ):
-        """Send an optional notification without interrupting the engine."""
+        """Send optional notifications without interrupting the engine."""
 
         if self.telegram is None:
             return False
@@ -150,14 +169,16 @@ class TradingEngine:
         method = getattr(
             self.telegram,
             method_name,
-            None
+            None,
         )
 
         if not callable(method):
+
             logger.warning(
                 "Telegram method %s is unavailable",
-                method_name
+                method_name,
             )
+
             return False
 
         try:
@@ -165,20 +186,23 @@ class TradingEngine:
             result = method(payload)
 
             if inspect.isawaitable(result):
-                await result
+                result = await result
 
-            return True
+            return result is not False
+
+        except asyncio.CancelledError:
+            raise
 
         except Exception:
 
             logger.exception(
                 "Telegram notification failed: %s",
-                method_name
+                method_name,
             )
 
             self._log_event(
                 "WARNING",
-                f"Telegram notification failed: {method_name}"
+                f"Telegram notification failed: {method_name}",
             )
 
             return False
@@ -189,13 +213,15 @@ class TradingEngine:
         getter = getattr(
             self.paper,
             "get_position",
-            None
+            None,
         )
 
         if not callable(getter):
+
             logger.error(
                 "PaperTrader.get_position() is unavailable"
             )
+
             return False
 
         try:
@@ -205,35 +231,39 @@ class TradingEngine:
 
             logger.exception(
                 "Could not retrieve opened position: %s",
-                symbol
+                symbol,
             )
 
             return False
 
         if not isinstance(position, dict):
+
             logger.error(
                 "Opened position could not be retrieved: %s",
-                symbol
+                symbol,
             )
+
             return False
 
         return await self._send_telegram_notification(
             "notify_trade_opened",
-            position
+            position,
         )
 
     async def _notify_trade_closed(self, trade):
-        """Notify Telegram after a closed paper trade has been committed."""
+        """Notify Telegram after a closed paper trade is committed."""
 
         if not isinstance(trade, dict):
+
             logger.warning(
                 "Invalid closed trade notification payload"
             )
+
             return False
 
         return await self._send_telegram_notification(
             "notify_trade_closed",
-            trade
+            trade,
         )
 
     # --------------------------------------------------
@@ -251,7 +281,6 @@ class TradingEngine:
 
             try:
 
-                # Start essential components.
                 for component in (
                     self.market,
                     self.ai,
@@ -260,9 +289,7 @@ class TradingEngine:
 
                     await component.start()
 
-                    started_components.append(
-                        component
-                    )
+                    started_components.append(component)
 
                 self.running = True
 
@@ -280,39 +307,51 @@ class TradingEngine:
 
                     self._log_event(
                         "WARNING",
-                        "Telegram startup failed"
+                        "Telegram startup failed",
                     )
+
+                    try:
+                        await self.telegram.close()
+                    except Exception:
+                        logger.exception(
+                            "Telegram startup cleanup failed"
+                        )
 
                 self.task = asyncio.create_task(
                     self.run_loop(),
-                    name="ai-quant-engine"
+                    name="ai-quant-engine",
                 )
 
                 logger.info(
-                    "AI QUANT engine started successfully."
+                    "AI QUANT engine started successfully"
                 )
 
                 self._log_event(
                     "INFO",
-                    "AI QUANT engine started"
+                    "AI QUANT engine started",
                 )
 
             except Exception:
 
                 self.running = False
 
-                # Clean up components that already started.
-                for component in reversed(
-                    started_components
-                ):
+                try:
+                    await self.telegram.close()
+                except Exception:
+                    logger.exception(
+                        "Telegram cleanup failed"
+                    )
+
+                for component in reversed(started_components):
 
                     try:
                         await component.close()
 
                     except Exception:
+
                         logger.exception(
                             "Startup cleanup failed for %s",
-                            component.__class__.__name__
+                            component.__class__.__name__,
                         )
 
                 self.task = None
@@ -332,7 +371,7 @@ class TradingEngine:
 
                 await asyncio.gather(
                     self.task,
-                    return_exceptions=True
+                    return_exceptions=True,
                 )
 
                 self.task = None
@@ -363,16 +402,14 @@ class TradingEngine:
 
                     logger.exception(
                         "Error closing %s",
-                        component.__class__.__name__
+                        component.__class__.__name__,
                     )
 
-            logger.info(
-                "AI QUANT engine stopped."
-            )
+            logger.info("AI QUANT engine stopped")
 
             self._log_event(
                 "INFO",
-                "AI QUANT engine stopped"
+                "AI QUANT engine stopped",
             )
 
     # --------------------------------------------------
@@ -389,45 +426,39 @@ class TradingEngine:
 
             try:
 
-                ticker = await self.market.ticker(
-                    symbol
-                )
+                ticker = await self.market.ticker(symbol)
 
                 if not isinstance(ticker, dict):
                     raise ValueError(
                         "Invalid ticker response"
                     )
 
-                price = float(
-                    ticker["last"]
-                )
+                price = ticker.get("last")
 
-                if (
-                    not math.isfinite(price)
-                    or price <= 0
-                ):
+                if not valid_positive_number(price):
                     raise ValueError(
                         "Invalid market price"
                     )
 
-                prices[symbol] = price
+                prices[symbol] = float(price)
 
             except Exception as exc:
 
                 message = (
-                    f"{symbol} ticker error: {exc}"
+                    f"{symbol} ticker error: "
+                    f"{type(exc).__name__}"
                 )
 
                 errors.append(message)
 
                 logger.exception(
                     "Ticker error for %s",
-                    symbol
+                    symbol,
                 )
 
                 self._log_event(
                     "ERROR",
-                    message
+                    message,
                 )
 
         return prices, errors
@@ -444,7 +475,61 @@ class TradingEngine:
         if inspect.isawaitable(result):
             result = await result
 
-        return bool(result)
+        if not isinstance(result, bool):
+            raise ValueError(
+                "News filter returned an invalid result"
+            )
+
+        return result
+
+    # --------------------------------------------------
+    # AI response validation
+    # --------------------------------------------------
+
+    @staticmethod
+    def _validate_ai_response(ai):
+        """Fail closed on malformed AI responses."""
+
+        unavailable = {
+            "vote": "UNAVAILABLE",
+            "agreement": 0.0,
+        }
+
+        if not isinstance(ai, dict):
+            return unavailable
+
+        vote = ai.get("vote")
+
+        if not isinstance(vote, str):
+            return unavailable
+
+        vote = vote.strip().upper()
+
+        if vote not in ("BUY", "SELL", "HOLD"):
+            return unavailable
+
+        agreement = ai.get("agreement")
+
+        # Do not accept bool as a numeric agreement.
+        if isinstance(agreement, bool):
+            return unavailable
+
+        try:
+            agreement = float(agreement)
+        except (TypeError, ValueError, OverflowError):
+            return unavailable
+
+        if (
+            not math.isfinite(agreement)
+            or not 0.0 <= agreement <= 1.0
+        ):
+            return unavailable
+
+        return {
+            **ai,
+            "vote": vote,
+            "agreement": agreement,
+        }
 
     # --------------------------------------------------
     # Symbol analysis
@@ -454,23 +539,21 @@ class TradingEngine:
         self,
         symbol,
         price,
-        prices
+        prices,
     ):
         """Analyze multiple timeframes and evaluate a paper entry."""
 
         frames = {}
 
-        # Fetch and calculate all required timeframes.
+        # Fetch and calculate all configured timeframes.
         for timeframe in TIMEFRAMES:
 
             candles = await self.market.klines(
                 symbol,
-                timeframe
+                timeframe,
             )
 
-            indicators = calculate_indicators(
-                candles
-            )
+            indicators = calculate_indicators(candles)
 
             if not isinstance(indicators, dict):
                 raise ValueError(
@@ -493,76 +576,34 @@ class TradingEngine:
             )
 
         # Check news risk.
-        blocked = await self._check_news(
-            symbol
-        )
+        blocked = await self._check_news(symbol)
 
         # Obtain AI council vote.
-        ai = await self.ai.vote({
+        raw_ai = await self.ai.vote({
             "symbol": symbol,
             "frames": frames,
         })
 
-        if not isinstance(ai, dict):
-
-            ai = {
-                "vote": "UNAVAILABLE",
-                "agreement": 0.0,
-                "reason": "Invalid AI response",
-            }
-
-        vote = ai.get(
-            "vote",
-            "UNAVAILABLE"
-        )
-
-        agreement = ai.get(
-            "agreement",
-            0.0
-        )
-
-        try:
-            agreement = float(agreement)
-
-        except (TypeError, ValueError):
-            agreement = 0.0
-
-        if (
-            not math.isfinite(agreement)
-            or not 0 <= agreement <= 1
-        ):
-            agreement = 0.0
+        ai = self._validate_ai_response(raw_ai)
 
         # Evaluate technical, AI and news conditions.
         decision = evaluate_setup(
             frames,
-            vote,
-            agreement,
-            blocked
+            ai["vote"],
+            ai["agreement"],
+            blocked,
         )
 
         if not isinstance(decision, dict):
-
             raise ValueError(
                 "Decision engine returned an invalid result"
             )
 
         decision = dict(decision)
 
-        decision.setdefault(
-            "action",
-            "HOLD"
-        )
-
-        decision.setdefault(
-            "score",
-            0
-        )
-
-        decision.setdefault(
-            "reason",
-            "No valid setup"
-        )
+        decision.setdefault("action", "HOLD")
+        decision.setdefault("score", 0)
+        decision.setdefault("reason", "No valid setup")
 
         decision["opened"] = False
 
@@ -574,14 +615,7 @@ class TradingEngine:
 
             atr = frames["15m"].get("atr")
 
-            valid_atr = (
-                isinstance(atr, (int, float))
-                and not isinstance(atr, bool)
-                and math.isfinite(atr)
-                and atr > 0
-            )
-
-            if not valid_atr:
+            if not valid_positive_number(atr):
 
                 decision["action"] = "HOLD"
 
@@ -598,24 +632,16 @@ class TradingEngine:
                 opened = self.paper.open_position(
                     symbol,
                     price,
-                    atr,
-                    prices=prices
+                    float(atr),
+                    prices=prices,
                 )
 
-                decision["opened"] = bool(
-                    opened
-                )
+                decision["opened"] = bool(opened)
 
                 if opened:
 
                     decision["entry_status"] = (
                         "Paper position opened"
-                    )
-
-                    # The paper trader saves the position first.
-                    # Telegram notification happens only afterward.
-                    await self._notify_trade_opened(
-                        symbol
                     )
 
                 else:
@@ -626,14 +652,19 @@ class TradingEngine:
                         "or position limits"
                     )
 
-        # Persist the final decision.
+        # Persist the final decision before sending notifications.
         self.db.record_decision(
             symbol,
             decision["action"],
             decision["score"],
             decision["reason"],
-            utc_now()
+            utc_now(),
         )
+
+        # Notify only after the position and decision are persisted.
+        if decision["opened"]:
+
+            await self._notify_trade_opened(symbol)
 
         return {
             "symbol": symbol,
@@ -653,13 +684,9 @@ class TradingEngine:
             results = []
             errors = []
 
-            prices, market_errors = (
-                await self._fetch_prices()
-            )
+            prices, market_errors = await self._fetch_prices()
 
-            errors.extend(
-                market_errors
-            )
+            errors.extend(market_errors)
 
             # Analyze every symbol with a valid ticker.
             for symbol in SYMBOLS:
@@ -672,36 +699,35 @@ class TradingEngine:
                     result = await self._analyze_symbol(
                         symbol,
                         prices[symbol],
-                        prices
+                        prices,
                     )
 
-                    results.append(
-                        result
-                    )
+                    results.append(result)
+
+                except asyncio.CancelledError:
+                    raise
 
                 except Exception as exc:
 
                     message = (
-                        f"{symbol} analysis failed: {exc}"
+                        f"{symbol} analysis failed: "
+                        f"{type(exc).__name__}"
                     )
 
-                    errors.append(
-                        message
-                    )
+                    errors.append(message)
 
                     logger.exception(
                         "Analysis failed for %s",
-                        symbol
+                        symbol,
                     )
 
                     self._log_event(
                         "ERROR",
-                        message
+                        message,
                     )
 
-            # Preserve the latest valid ticker snapshot.
+            # Preserve latest valid ticker snapshot.
             if prices:
-
                 self.last_prices = prices.copy()
 
             # Update open paper positions independently
@@ -710,39 +736,32 @@ class TradingEngine:
 
                 try:
 
-                    closed = self.paper.update(
-                        prices
-                    )
+                    closed = self.paper.update(prices)
 
                     if closed:
 
-                        logger.info(
-                            "Paper positions closed: %s",
-                            closed
-                        )
-
                         self._log_event(
                             "INFO",
-                            f"Paper positions closed: {closed}"
+                            f"Paper positions closed: {len(closed)}",
                         )
 
-                        # update() returns closed trades only
-                        # after their database transaction commits.
+                        # PaperTrader.update() must return only
+                        # trades whose database transactions committed.
                         for trade in closed:
 
-                            await self._notify_trade_closed(
-                                trade
-                            )
+                            await self._notify_trade_closed(trade)
+
+                except asyncio.CancelledError:
+                    raise
 
                 except Exception as exc:
 
                     message = (
-                        f"Portfolio update failed: {exc}"
+                        "Portfolio update failed: "
+                        f"{type(exc).__name__}"
                     )
 
-                    errors.append(
-                        message
-                    )
+                    errors.append(message)
 
                     logger.exception(
                         "Portfolio update failed"
@@ -750,16 +769,14 @@ class TradingEngine:
 
                     self._log_event(
                         "ERROR",
-                        message
+                        message,
                     )
 
             self.last_scan = utc_now()
 
             if errors:
 
-                self.last_error = (
-                    " | ".join(errors)[:1000]
-                )
+                self.last_error = " | ".join(errors)[:1000]
 
             elif not results:
 
@@ -787,13 +804,12 @@ class TradingEngine:
                 await self.scan_once()
 
             except asyncio.CancelledError:
-
                 raise
 
             except Exception as exc:
 
                 self._set_error(
-                    f"Engine loop error: {exc}"
+                    f"Engine loop error: {type(exc).__name__}"
                 )
 
             try:
@@ -803,7 +819,6 @@ class TradingEngine:
                 )
 
             except asyncio.CancelledError:
-
                 raise
 
 
