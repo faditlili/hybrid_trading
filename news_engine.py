@@ -36,6 +36,16 @@ CRITICAL = (
     "funds stolen",
     "withdrawals suspended",
     "regulatory investigation",
+    "exchange suspended",
+    "exchange insolvency",
+    "اختراق",
+    "قرصنة",
+    "إفلاس",
+    "احتيال",
+    "سرقة أموال",
+    "تعليق السحب",
+    "إيقاف التداول",
+    "تحقيق تنظيمي",
 )
 
 MAX_FEED_BYTES = 1_000_000
@@ -55,15 +65,11 @@ SYMBOL_ALIASES = {
 class NewsEngine:
 
     def __init__(self):
-
         self.session = None
-
         self.items = []
         self.updated = 0
-
         self.last_error = None
         self.available_feed_count = 0
-
         self.refresh_lock = asyncio.Lock()
 
     # --------------------------------------------------
@@ -72,38 +78,31 @@ class NewsEngine:
 
     async def start(self):
 
-        if (
-            self.session is None
-            or self.session.closed
-        ):
+        if self.session is not None and not self.session.closed:
+            return
 
-            timeout = aiohttp.ClientTimeout(
-                total=HTTP_TIMEOUT_SECONDS
-            )
+        timeout = aiohttp.ClientTimeout(
+            total=HTTP_TIMEOUT_SECONDS
+        )
 
-            connector = aiohttp.TCPConnector(
-                limit=10,
-                ttl_dns_cache=300
-            )
+        connector = aiohttp.TCPConnector(
+            limit=10,
+            ttl_dns_cache=300,
+        )
 
-            self.session = aiohttp.ClientSession(
-                timeout=timeout,
-                connector=connector,
-                headers={
-                    "User-Agent": (
-                        "AI-QUANT-Paper-Research/4.0"
-                    )
-                }
-            )
+        self.session = aiohttp.ClientSession(
+            timeout=timeout,
+            connector=connector,
+            headers={
+                "User-Agent": "AI-QUANT-Paper-Research/4.0"
+            },
+        )
 
     async def close(self):
 
-        if (
-            self.session is not None
-            and not self.session.closed
-        ):
-
-            await self.session.close()
+        if self.session is not None:
+            if not self.session.closed:
+                await self.session.close()
 
         self.session = None
 
@@ -113,8 +112,6 @@ class NewsEngine:
 
     @staticmethod
     def _local_name(tag):
-        """Return an XML tag without its namespace."""
-
         if not isinstance(tag, str):
             return ""
 
@@ -126,75 +123,65 @@ class NewsEngine:
         for child in element:
 
             if cls._local_name(child.tag) == name.lower():
-
-                return (
-                    "".join(child.itertext()).strip()
-                )
+                return "".join(child.itertext()).strip()
 
         return ""
 
     @classmethod
     def _extract_link(cls, element):
 
-        # RSS format.
-        link = cls._child_text(
-            element,
-            "link"
-        )
+        # RSS link.
+        link = cls._child_text(element, "link")
 
         if link:
             return link[:MAX_LINK_LENGTH]
 
-        # Atom format: <link href="..."/>
+        # Atom link.
         for child in element:
 
-            if cls._local_name(child.tag) == "link":
+            if cls._local_name(child.tag) != "link":
+                continue
 
-                href = child.attrib.get(
-                    "href",
-                    ""
-                )
+            rel = child.attrib.get("rel", "alternate")
 
-                if href:
-                    return href[:MAX_LINK_LENGTH]
+            if rel not in ("alternate", ""):
+                continue
+
+            href = child.attrib.get("href", "").strip()
+
+            if href:
+                return href[:MAX_LINK_LENGTH]
 
         return ""
 
     @classmethod
     def _parse_feed(cls, raw, source):
 
+        if not isinstance(raw, bytes) or not raw:
+            raise ValueError("Empty RSS response")
+
         root = ET.fromstring(raw)
 
         found = []
 
-        # Supports RSS <item> and Atom <entry>.
         for element in root.iter():
 
-            element_name = cls._local_name(
-                element.tag
-            )
+            element_name = cls._local_name(element.tag)
 
-            if element_name not in (
-                "item",
-                "entry"
-            ):
+            if element_name not in ("item", "entry"):
                 continue
 
-            title = cls._child_text(
-                element,
-                "title"
-            )
+            title = cls._child_text(element, "title")
 
             if not title:
                 continue
 
-            link = cls._extract_link(
-                element
-            )
+            # Normalize whitespace.
+            title = " ".join(title.split())
 
             found.append({
                 "title": title[:MAX_TITLE_LENGTH],
-                "link": link,
+                "link": cls._extract_link(element),
                 "source": source,
             })
 
@@ -212,18 +199,27 @@ class NewsEngine:
 
         try:
 
-            if (
-                self.session is None
-                or self.session.closed
-            ):
+            if self.session is None or self.session.closed:
                 await self.start()
 
-            async with self.session.get(url) as response:
+            async with self.session.get(
+                url,
+                allow_redirects=True,
+            ) as response:
 
                 if response.status != 200:
-
                     raise RuntimeError(
                         f"RSS HTTP status {response.status}"
+                    )
+
+                content_length = response.content_length
+
+                if (
+                    content_length is not None
+                    and content_length > MAX_FEED_BYTES
+                ):
+                    raise ValueError(
+                        "RSS feed exceeds size limit"
                     )
 
                 raw = await response.content.read(
@@ -231,22 +227,21 @@ class NewsEngine:
                 )
 
                 if len(raw) > MAX_FEED_BYTES:
-
                     raise ValueError(
                         "RSS feed exceeds size limit"
                     )
 
-                return self._parse_feed(
-                    raw,
-                    url
-                )
+                return self._parse_feed(raw, url)
+
+        except asyncio.CancelledError:
+            raise
 
         except Exception as exc:
 
             logger.warning(
                 "RSS feed unavailable (%s): %s",
                 url,
-                exc
+                type(exc).__name__,
             )
 
             return None
@@ -266,7 +261,6 @@ class NewsEngine:
                 and self.updated
                 and now - self.updated < NEWS_REFRESH_SECONDS
             ):
-
                 return self.items
 
             await self.start()
@@ -276,7 +270,7 @@ class NewsEngine:
                     self._get_feed(url)
                     for url in FEEDS
                 ),
-                return_exceptions=True
+                return_exceptions=True,
             )
 
             gathered = []
@@ -293,40 +287,35 @@ class NewsEngine:
 
                     logger.warning(
                         "Unexpected RSS retrieval error: %s",
-                        batch
+                        type(batch).__name__,
                     )
 
-            self.available_feed_count = (
-                successful_feeds
-            )
+            self.available_feed_count = successful_feeds
 
-            # Deduplicate headlines.
+            # Deduplicate by normalized headline.
             unique = {}
 
             for item in gathered:
 
-                key = item["title"].casefold()
+                key = " ".join(
+                    item["title"].casefold().split()
+                )
 
-                unique[key] = item
+                if key:
+                    unique.setdefault(key, item)
 
             if successful_feeds == 0:
 
-                self.last_error = (
-                    "All RSS feeds unavailable"
-                )
+                self.last_error = "All RSS feeds unavailable"
 
-                logger.error(
-                    self.last_error
-                )
+                logger.error(self.last_error)
 
-                # Keep previous headlines for diagnostics,
-                # but blocks() will fail closed.
+                # Retain previous headlines for diagnostics.
+                # blocks() still fails closed.
 
             else:
 
-                self.items = list(
-                    unique.values()
-                )
+                self.items = list(unique.values())
 
                 if successful_feeds < len(FEEDS):
 
@@ -334,15 +323,12 @@ class NewsEngine:
                         "Some RSS feeds unavailable"
                     )
 
-                    logger.warning(
-                        self.last_error
-                    )
+                    logger.warning(self.last_error)
 
                 else:
 
                     self.last_error = None
 
-            # Avoid excessive retries during an outage.
             self.updated = time.time()
 
             return self.items
@@ -364,7 +350,7 @@ class NewsEngine:
 
         aliases = SYMBOL_ALIASES.get(
             base,
-            (base.lower(),)
+            (base.lower(),),
         )
 
         return tuple(
@@ -386,15 +372,13 @@ class NewsEngine:
         return re.search(
             pattern,
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         ) is not None
 
     @classmethod
     def _is_relevant(cls, title, symbol):
 
-        terms = cls._symbol_terms(
-            symbol
-        )
+        terms = cls._symbol_terms(symbol)
 
         return any(
             cls._contains_term(title, term)
@@ -426,37 +410,27 @@ class NewsEngine:
 
         await self.refresh()
 
-        # Fail closed if no source is available.
         if self.available_feed_count == 0:
 
             logger.warning(
                 "Blocking %s: all news sources unavailable",
-                symbol
+                symbol,
             )
 
             return True
 
         for item in self.items:
 
-            title = item.get(
-                "title",
-                ""
-            ).casefold()
+            title = item.get("title", "")
 
-            relevant = self._is_relevant(
-                title,
-                symbol
-            )
-
-            if not relevant:
+            if not self._is_relevant(title, symbol):
                 continue
 
             if self._is_critical(title):
 
                 logger.warning(
-                    "Critical headline detected for %s: %s",
+                    "Critical headline detected for %s",
                     symbol,
-                    title
                 )
 
                 return True
