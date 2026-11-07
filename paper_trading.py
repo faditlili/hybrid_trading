@@ -1,181 +1,55 @@
-"""Simulated portfolio tracking capital compounding and partial targets."""
+"""Paper-only portfolio accounting. No exchange order functionality exists here."""
+from datetime import datetime, timezone
 import math
-import time
-import config
+from config import PORTFOLIO_EXPOSURE_LIMIT, MAX_OPEN_POSITIONS, FEE_RATE, SLIPPAGE_BPS, STOP_ATR_MULTIPLIER, TARGET_R_MULTIPLIER
+
 class PaperTrader:
-    def __init__(self, db):
-        self.db = db
-    def open_position(self, symbol, price, atr):
-        a = self.db.account()
-        positions = self.db.positions()
-        
-        if len(positions) >= config.MAX_OPEN_POSITIONS: 
-            return False
-        if any(p["symbol"] == symbol for p in positions): 
-            return False
-            
-        price, atr = float(price), float(atr)
-        if not math.isfinite(price) or price <= 0 or atr <= 0: 
-            return False
-        
-        stop = price - 2 * atr
-        target = price + 4 * atr
-        # Linear compounding calculation loop based on current active equity
-        risk_cash = a["equity"] * config.RISK_PER_TRADE
-        qty = risk_cash / (price - stop)
-        notional = qty * price
-        
-        cap = min(
-            a["balance"] * config.MAX_ALLOCATION, 
-            a["equity"] * config.MAX_ALLOCATION
-        )
-        fee = notional * config.FEE_RATE
-        if (
-            notional + fee > cap 
-            or notional + fee > a["balance"]
-        ):
-            max_cap = min(cap, a["balance"])
-            qty = max(
-                0, 
-                (max_cap / (1 + config.FEE_RATE)) 
-                / price
-            )
-            notional = qty * price
-            fee = notional * config.FEE_RATE
-            
-        if qty <= 0 or notional + fee > a["balance"]: 
-            return False
+    def __init__(self, db): self.db=db
+    @staticmethod
+    def now(): return datetime.now(timezone.utc).isoformat()
+    def equity(self, prices=None):
+        a=self.db.account(); positions=self.db.positions(); prices=prices or {}
+        return a["cash"]+sum(p["qty"]*float(prices.get(p["symbol"],p["entry"])) for p in positions)
+    def exposure(self, prices=None):
+        prices=prices or {}; return sum(p["qty"]*float(prices.get(p["symbol"],p["entry"])) for p in self.db.positions())
+    def open_position(self,symbol,price,atr,prices=None):
+        if not all(math.isfinite(float(x)) and float(x)>0 for x in (price,atr)): return False
+        price=float(price); atr=float(atr); positions=self.db.positions()
+        if len(positions)>=MAX_OPEN_POSITIONS or any(p["symbol"]==symbol for p in positions): return False
+        prices=prices or {}; equity=self.equity(prices); cap=equity*PORTFOLIO_EXPOSURE_LIMIT; remaining=cap-self.exposure(prices)
+        fill=price*(1+SLIPPAGE_BPS/10000); stop=fill-STOP_ATR_MULTIPLIER*atr
+        if stop<=0 or remaining<=0: return False
+        # Solve the cap against post-fee equity, not pre-entry equity.
+        notional=remaining/(1+PORTFOLIO_EXPOSURE_LIMIT*FEE_RATE)
+        qty=notional/fill; fee=notional*FEE_RATE
+        account=self.db.account()
+        if notional+fee>account["cash"]:
+            notional=account["cash"]/(1+FEE_RATE); qty=notional/fill; fee=notional*FEE_RATE
+        if qty<=0 or notional<1: return False
+        target=fill+(fill-stop)*TARGET_R_MULTIPLIER
         with self.db.lock:
-            c = self.db.conn
-            c.execute(
-                "INSERT INTO positions(symbol, "
-                "entry, qty, stop, target, "
-                "entry_fee, opened, status) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, 'OPEN')", 
-                (symbol, price, qty, stop, 
-                 target, fee, time.time())
-            )
-            c.execute(
-                "UPDATE account SET "
-                "balance=balance-? WHERE id=1", 
-                (notional + fee,)
-            )
-            c.commit()
-        return True
+            try:
+                self.db.conn.execute("BEGIN IMMEDIATE")
+                self.db.conn.execute("UPDATE account SET cash=cash-? WHERE id=1",(notional+fee,))
+                self.db.conn.execute("INSERT INTO positions(symbol,qty,entry,stop,target,notional,entry_fee,opened_at) VALUES(?,?,?,?,?,?,?,?)",(symbol,qty,fill,stop,target,notional,fee,self.now()))
+                self.db.conn.execute("INSERT INTO trades(symbol,side,qty,price,pnl,fee,created_at,reason) VALUES(?,?,?,?,?,?,?,?)",(symbol,"PAPER_BUY",qty,fill,0,fee,self.now(),"paper simulation entry"))
+                self.db.conn.commit(); return True
+            except Exception:
+                self.db.conn.rollback(); raise
     def update(self, prices):
-        closed = []
-        with self.db.lock:
-            for p in self.db.positions():
-                price = float(
-                    prices.get(p["symbol"], 0) 
-                    or 0
-                )
-                if price <= 0: 
-                    continue
-                
-                atr_unit = (
-                    (p["target"] - p["entry"]) 
-                    / 4
-                )
-                tp1 = p["entry"] + 2 * atr_unit
-                # Partial profit take trigger matrix
-                if price >= tp1 and p["entry_fee"] > 0:
-                    fill = tp1 * (
-                        1 - config.SLIPPAGE_BPS 
-                        / 10000
-                    )
-                    gross = (
-                        (fill - p["entry"]) 
-                        * (p["qty"] * 0.5)
-                    )
-                    fee = (
-                        fill * (p["qty"] * 0.5) 
-                        * config.FEE_RATE
-                    )
-                    pnl = gross - fee
-                    
-                    c = self.db.conn
-                    c.execute(
-                        "UPDATE positions SET "
-                        "qty=qty*0.5, stop=?, "
-                        "entry_fee=0 WHERE id=?", 
-                        (p["entry"], p["id"])
-                    )
-                    c.execute(
-                        "UPDATE account SET "
-                        "balance=balance+?, "
-                        "realized_pnl=realized_pnl+? "
-                        "WHERE id=1", 
-                        (fill * (p["qty"] * 0.5) 
-                         - fee, pnl)
-                    )
-                    c.execute(
-                        "INSERT INTO trades(symbol, "
-                        "side, price, qty, pnl, "
-                        "created) "
-                        "VALUES(?, 'SELL_PARTIAL', "
-                        "?, ?, ?, ?)", 
-                        (p["symbol"], fill, 
-                         p["qty"] * 0.5, pnl, 
-                         time.time())
-                    )
-                    c.commit()
-                    continue
-                # Final stop loss and take profit validation gates
-                if (
-                    price <= p["stop"] 
-                    or price >= p["target"]
-                ):
-                    if price <= p["stop"]:
-                        trigger = p["stop"]
-                    else:
-                        trigger = p["target"]
-                        
-                    fill = trigger * (
-                        1 - config.SLIPPAGE_BPS 
-                        / 10000
-                    )
-                    gross = (
-                        (fill - p["entry"]) 
-                        * p["qty"]
-                    )
-                    fee = (
-                        fill * p["qty"] 
-                        * config.FEE_RATE
-                    )
-                    pnl = (
-                        gross 
-                        - float(p["entry_fee"]) 
-                        - fee
-                    )
-                    c = self.db.conn
-                    c.execute(
-                        "UPDATE positions SET "
-                        "status='CLOSED' WHERE id=?", 
-                        (p["id"],)
-                    )
-                    c.execute(
-                        "UPDATE account SET "
-                        "balance=balance+?, "
-                        "equity=equity+?, "
-                        "realized_pnl=realized_pnl+? "
-                        "WHERE id=1", 
-                        (fill * p["qty"] - fee, 
-                         pnl, pnl)
-                    )
-                    c.execute(
-                        "INSERT INTO trades(symbol, "
-                        "side, price, qty, pnl, "
-                        "created) "
-                        "VALUES(?, 'SELL_FINAL', "
-                        "?, ?, ?, ?)", 
-                        (p["symbol"], fill, 
-                         p["qty"], pnl, 
-                         time.time())
-                    )
-                    c.commit()
-                    closed.append({
-                        "symbol": p["symbol"], 
-                        "pnl": pnl
-                    })
+        closed=[]
+        for p in self.db.positions():
+            price=prices.get(p["symbol"])
+            if price is None or not math.isfinite(float(price)): continue
+            price=float(price)
+            if price<=p["stop"] or price>=p["target"]:
+                fill=price*(1-SLIPPAGE_BPS/10000); gross=(fill-p["entry"])*p["qty"]; fee=fill*p["qty"]*FEE_RATE; pnl=gross-p["entry_fee"]-fee
+                with self.db.lock:
+                    try:
+                        self.db.conn.execute("BEGIN IMMEDIATE")
+                        self.db.conn.execute("UPDATE account SET cash=cash+?,realized_pnl=realized_pnl+? WHERE id=1",(fill*p["qty"]-fee,pnl))
+                        self.db.conn.execute("DELETE FROM positions WHERE id=?",(p["id"],))
+                        self.db.conn.execute("INSERT INTO trades(symbol,side,qty,price,pnl,fee,created_at,reason) VALUES(?,?,?,?,?,?,?,?)",(p["symbol"],"PAPER_SELL",p["qty"],fill,pnl,fee,self.now(),"stop/target simulation"))
+                        self.db.conn.commit(); closed.append({"symbol":p["symbol"],"pnl":pnl})
+                    except Exception: self.db.conn.rollback(); raise
         return closed
