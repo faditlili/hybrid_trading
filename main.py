@@ -1,3 +1,4 @@
+
 """AI QUANT 4.0 - Application entry point.
 Paper simulation only. No real exchange orders.
 """
@@ -10,6 +11,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
+import config
 from config import APP_NAME, APP_VERSION, HOST, PORT
 from database import Database
 from engine import Engine
@@ -33,9 +35,11 @@ logger = logging.getLogger("AI_QUANT")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-
     db = None
     engine = None
+
+    app.state.db = None
+    app.state.engine = None
 
     logger.info(
         "Starting %s version %s",
@@ -44,16 +48,12 @@ async def lifespan(app: FastAPI):
     )
 
     try:
-        # Initialize persistent database.
         db = Database()
-
-        # Engine requires the database instance.
         engine = Engine(db)
 
         app.state.db = db
         app.state.engine = engine
 
-        # Start market, AI and news services.
         await engine.start()
 
         logger.info("AI QUANT started successfully.")
@@ -61,7 +61,7 @@ async def lifespan(app: FastAPI):
         yield
 
     except Exception:
-        logger.exception("Application startup/runtime failure.")
+        logger.exception("Application lifecycle failure.")
         raise
 
     finally:
@@ -94,7 +94,8 @@ app = FastAPI(
     version=APP_VERSION,
     description=(
         "Advanced cryptocurrency market analysis "
-        "and paper portfolio simulation."
+        "and paper portfolio simulation. "
+        "No real exchange orders are executed."
     ),
     lifespan=lifespan,
 )
@@ -109,16 +110,11 @@ app.add_middleware(
 
 
 # --------------------------------------------------
-# Application dependencies
+# Dependencies
 # --------------------------------------------------
 
 def get_engine(request: Request):
-
-    engine = getattr(
-        request.app.state,
-        "engine",
-        None
-    )
+    engine = getattr(request.app.state, "engine", None)
 
     if engine is None:
         raise RuntimeError("Engine unavailable")
@@ -127,17 +123,21 @@ def get_engine(request: Request):
 
 
 def get_database(request: Request):
-
-    db = getattr(
-        request.app.state,
-        "db",
-        None
-    )
+    db = getattr(request.app.state, "db", None)
 
     if db is None:
         raise RuntimeError("Database unavailable")
 
     return db
+
+
+def service_error(logger_message: str, exc: Exception):
+    logger.exception("%s: %s", logger_message, exc)
+
+    return JSONResponse(
+        status_code=503,
+        content={"error": "Service temporarily unavailable"},
+    )
 
 
 # --------------------------------------------------
@@ -146,23 +146,24 @@ def get_database(request: Request):
 
 @app.get("/health")
 async def health(request: Request):
-
-    engine = getattr(
-        request.app.state,
-        "engine",
-        None
-    )
-
-    db = getattr(
-        request.app.state,
-        "db",
-        None
-    )
+    engine = getattr(request.app.state, "engine", None)
+    db = getattr(request.app.state, "db", None)
 
     if engine is None or db is None:
         return JSONResponse(
             status_code=503,
             content={"status": "starting"},
+        )
+
+    is_running = bool(getattr(engine, "running", False))
+
+    if not is_running:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "degraded",
+                "engine_running": False,
+            },
         )
 
     return {
@@ -171,7 +172,7 @@ async def health(request: Request):
         "version": APP_VERSION,
         "mode": "PAPER_TRADING",
         "database": "connected",
-        "engine_running": engine.running,
+        "engine_running": True,
     }
 
 
@@ -186,7 +187,6 @@ async def api_health(request: Request):
 
 @app.get("/")
 async def root():
-
     return {
         "application": APP_NAME,
         "version": APP_VERSION,
@@ -204,19 +204,16 @@ async def root():
 @app.get("/status")
 @app.get("/dashboard/status")
 async def dashboard_status(request: Request):
-
     try:
         engine = get_engine(request)
-
         db = get_database(request)
 
         account = db.account()
-
-        prices = engine.last_prices
+        prices = engine.last_prices or {}
 
         equity = engine.paper.equity(prices)
-
         exposure = engine.paper.exposure(prices)
+        risk_budget = engine.paper.risk_budget(prices)
 
         return {
             "application": APP_NAME,
@@ -229,9 +226,11 @@ async def dashboard_status(request: Request):
             "equity": equity,
             "exposure": exposure,
 
-            "risk_fraction": 0.10,
-            "risk_budget": engine.paper.risk_budget(prices),
+            "risk_fraction": config.PORTFOLIO_RISK_FRACTION,
+            "risk_budget": risk_budget,
 
+            "exposure_limit": config.PORTFOLIO_EXPOSURE_LIMIT,
+            "max_open_positions": config.MAX_OPEN_POSITIONS,
             "open_positions": len(db.positions()),
 
             "last_scan": engine.last_scan,
@@ -241,13 +240,7 @@ async def dashboard_status(request: Request):
         }
 
     except Exception as exc:
-
-        logger.exception("Portfolio status failed.")
-
-        return JSONResponse(
-            status_code=503,
-            content={"error": str(exc)},
-        )
+        return service_error("Portfolio status failed", exc)
 
 
 # --------------------------------------------------
@@ -256,20 +249,12 @@ async def dashboard_status(request: Request):
 
 @app.get("/dashboard/positions")
 async def dashboard_positions(request: Request):
-
     try:
         db = get_database(request)
-
         return db.get_positions()
 
     except Exception as exc:
-
-        logger.exception("Positions endpoint failed.")
-
-        return JSONResponse(
-            status_code=503,
-            content={"error": str(exc)},
-        )
+        return service_error("Positions endpoint failed", exc)
 
 
 # --------------------------------------------------
@@ -278,20 +263,12 @@ async def dashboard_positions(request: Request):
 
 @app.get("/dashboard/trades")
 async def dashboard_trades(request: Request):
-
     try:
         db = get_database(request)
-
         return db.get_trades(100)
 
     except Exception as exc:
-
-        logger.exception("Trades endpoint failed.")
-
-        return JSONResponse(
-            status_code=503,
-            content={"error": str(exc)},
-        )
+        return service_error("Trades endpoint failed", exc)
 
 
 # --------------------------------------------------
@@ -300,20 +277,12 @@ async def dashboard_trades(request: Request):
 
 @app.get("/dashboard/decisions")
 async def dashboard_decisions(request: Request):
-
     try:
         db = get_database(request)
-
         return db.get_decisions(100)
 
     except Exception as exc:
-
-        logger.exception("Decisions endpoint failed.")
-
-        return JSONResponse(
-            status_code=503,
-            content={"error": str(exc)},
-        )
+        return service_error("Decisions endpoint failed", exc)
 
 
 # --------------------------------------------------
@@ -322,7 +291,6 @@ async def dashboard_decisions(request: Request):
 
 @app.get("/system/status")
 async def system_status(request: Request):
-
     try:
         engine = get_engine(request)
 
@@ -334,11 +302,7 @@ async def system_status(request: Request):
         }
 
     except Exception as exc:
-
-        return JSONResponse(
-            status_code=503,
-            content={"error": str(exc)},
-        )
+        return service_error("System status failed", exc)
 
 
 # --------------------------------------------------
@@ -346,23 +310,29 @@ async def system_status(request: Request):
 # --------------------------------------------------
 
 try:
-
     import gradio as gr
-
     from dashboard import build_dashboard
+
+    dashboard_app = build_dashboard()
 
     app = gr.mount_gradio_app(
         app,
-        build_dashboard(),
+        dashboard_app,
         path="/ui",
     )
 
     logger.info("Gradio dashboard mounted at /ui")
 
 except ImportError:
+    logger.exception(
+        "Gradio or dashboard dependency is unavailable. "
+        "The API will remain operational."
+    )
 
-    logger.warning(
-        "Gradio unavailable. API remains operational."
+except Exception:
+    logger.exception(
+        "Dashboard mounting failed. "
+        "The API will remain operational."
     )
 
 
@@ -371,7 +341,6 @@ except ImportError:
 # --------------------------------------------------
 
 if __name__ == "__main__":
-
     import uvicorn
 
     uvicorn.run(
@@ -380,8 +349,5 @@ if __name__ == "__main__":
         port=PORT,
         reload=False,
         workers=1,
-        log_level=os.getenv(
-            "LOG_LEVEL",
-            "info"
-        ).lower(),
+        log_level=os.getenv("LOG_LEVEL", "info").lower(),
     )
