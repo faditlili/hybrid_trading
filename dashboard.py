@@ -1,39 +1,4 @@
-import math
-import logging
-import html
 
-import gradio as gr
-
-
-logger = logging.getLogger(__name__)
-
-
-# ============================================================
-# MOBILE-FIRST STYLE
-# ============================================================
-
-CSS = """
-:root {
-    color-scheme: dark;
-}
-
-body,
-.gradio-container {
-    background: #080d18 !important;
-    color: #e5edf9 !important;
-    font-family: Arial, sans-serif !important;
-}
-
-.gradio-container {
-    max-width: 1250px !important;
-    margin: auto !important;
-    padding: 12px !important;
-}
-
-#main-title {
-    color: #00e5ff !important;
-    text-align: center;
-    font-size: 30px !important;
     font-weight: 900 !important;
     margin-bottom: 2px !important;
 }
