@@ -19,7 +19,7 @@ from paper_trading import PaperTrader
 
 logger = logging.getLogger(__name__)
 
-SYMBOLS = config.SYMBOLS
+SYMBOLS = tuple(config.SYMBOLS)
 
 TIMEFRAMES = getattr(
     config,
@@ -30,7 +30,14 @@ TIMEFRAMES = getattr(
 if isinstance(TIMEFRAMES, str):
     TIMEFRAMES = (TIMEFRAMES,)
 
-SCAN_INTERVAL_SECONDS = config.SCAN_INTERVAL_SECONDS
+TIMEFRAMES = tuple(TIMEFRAMES)
+
+REQUIRED_TIMEFRAMES = ("15m", "1h", "4h")
+
+SCAN_INTERVAL_SECONDS = max(
+    1,
+    int(config.SCAN_INTERVAL_SECONDS)
+)
 
 
 def utc_now():
@@ -68,7 +75,14 @@ class TradingEngine:
                 utc_now()
             )
         except Exception:
-            logger.exception("Could not write database event")
+            logger.exception(
+                "Could not write database event"
+            )
+
+    def _set_error(self, message):
+        self.last_error = str(message)[:1000]
+        logger.error("%s", self.last_error)
+        self._log_event("ERROR", self.last_error)
 
     async def start(self):
         async with self.lifecycle_lock:
@@ -89,11 +103,10 @@ class TradingEngine:
 
                 self.running = True
 
-                if self.task is None or self.task.done():
-                    self.task = asyncio.create_task(
-                        self.run_loop(),
-                        name="ai-quant-engine"
-                    )
+                self.task = asyncio.create_task(
+                    self.run_loop(),
+                    name="ai-quant-engine"
+                )
 
                 logger.info("AI QUANT engine started.")
 
@@ -108,6 +121,7 @@ class TradingEngine:
                             "Startup cleanup failed"
                         )
 
+                self.task = None
                 raise
 
     async def stop(self):
@@ -140,40 +154,138 @@ class TradingEngine:
 
             logger.info("AI QUANT engine stopped.")
 
+    async def _fetch_prices(self):
+        """Fetch valid ticker prices independently for each symbol."""
+
+        prices = {}
+        errors = []
+
+        for symbol in SYMBOLS:
+            try:
+                ticker = await self.market.ticker(symbol)
+
+                if not isinstance(ticker, dict):
+                    raise ValueError("Invalid ticker response")
+
+                price = float(ticker["last"])
+
+                if not math.isfinite(price) or price <= 0:
+                    raise ValueError("Invalid market price")
+
+                prices[symbol] = price
+
+            except Exception as exc:
+                message = f"{symbol} ticker error: {exc}"
+                errors.append(message)
+
+                logger.exception(
+                    "Ticker error for %s",
+                    symbol
+                )
+
+                self._log_event("ERROR", message)
+
+        return prices, errors
+
+    async def _analyze_symbol(self, symbol, price, prices):
+        """Analyze one symbol and optionally open a paper position."""
+
+        frames = {}
+
+        for timeframe in TIMEFRAMES:
+            candles = await self.market.klines(
+                symbol,
+                timeframe
+            )
+
+            frames[timeframe] = calculate_indicators(
+                candles
+            )
+
+        missing = [
+            timeframe
+            for timeframe in REQUIRED_TIMEFRAMES
+            if timeframe not in frames
+        ]
+
+        if missing:
+            raise ValueError(
+                "Required analysis timeframes missing: "
+                + ", ".join(missing)
+            )
+
+        blocked = await self.news.blocks(symbol)
+
+        ai = await self.ai.vote({
+            "symbol": symbol,
+            "frames": frames
+        })
+
+        decision = evaluate_setup(
+            frames,
+            ai.get("vote", "UNAVAILABLE"),
+            ai.get("agreement", 0.0),
+            blocked
+        )
+
+        self.db.record_decision(
+            symbol,
+            decision["action"],
+            decision["score"],
+            decision["reason"],
+            utc_now()
+        )
+
+        decision["opened"] = False
+
+        if decision["action"] == "PAPER_BUY_CANDIDATE":
+
+            atr = frames["15m"].get("atr")
+
+            if (
+                isinstance(atr, bool)
+                or not isinstance(atr, (int, float))
+                or not math.isfinite(atr)
+                or atr <= 0
+            ):
+                decision["reason"] = (
+                    "Invalid ATR: paper entry rejected"
+                )
+
+            else:
+                decision["opened"] = self.paper.open_position(
+                    symbol,
+                    price,
+                    atr,
+                    prices=prices
+                )
+
+                if not decision["opened"]:
+                    decision["entry_status"] = (
+                        "Rejected by portfolio risk, "
+                        "exposure, cash, or position limits"
+                    )
+                else:
+                    decision["entry_status"] = (
+                        "Paper position opened"
+                    )
+
+        return {
+            "symbol": symbol,
+            **decision,
+            "ai": ai
+        }
+
     async def scan_once(self):
+        """Run one complete market-analysis and portfolio cycle."""
 
         async with self.scan_lock:
 
-            prices = {}
             results = []
-            market_errors = {}
+            errors = []
 
-            for symbol in SYMBOLS:
-
-                try:
-                    ticker = await self.market.ticker(symbol)
-
-                    price = float(ticker["last"])
-
-                    if not math.isfinite(price) or price <= 0:
-                        raise ValueError("Invalid market price")
-
-                    prices[symbol] = price
-
-                except Exception as exc:
-                    market_errors[symbol] = str(exc)
-
-                    self.last_error = f"{symbol}: {exc}"
-
-                    logger.exception(
-                        "Ticker error: %s",
-                        symbol
-                    )
-
-                    self._log_event(
-                        "ERROR",
-                        self.last_error
-                    )
+            prices, market_errors = await self._fetch_prices()
+            errors.extend(market_errors)
 
             for symbol in SYMBOLS:
 
@@ -181,126 +293,68 @@ class TradingEngine:
                     continue
 
                 try:
-                    frames = {}
-
-                    for timeframe in TIMEFRAMES:
-                        candles = await self.market.klines(
-                            symbol,
-                            timeframe
-                        )
-
-                        frames[timeframe] = calculate_indicators(
-                            candles
-                        )
-
-                    if any(
-                        timeframe not in frames
-                        for timeframe in ("15m", "1h", "4h")
-                    ):
-                        raise ValueError(
-                            "Required analysis timeframe missing"
-                        )
-
-                    blocked = await self.news.blocks(symbol)
-
-                    ai = await self.ai.vote({
-                        "symbol": symbol,
-                        "frames": frames
-                    })
-
-                    decision = evaluate_setup(
-                        frames,
-                        ai.get("vote", "UNAVAILABLE"),
-                        ai.get("agreement", 0.0),
-                        blocked
-                    )
-
-                    self.db.record_decision(
+                    result = await self._analyze_symbol(
                         symbol,
-                        decision["action"],
-                        decision["score"],
-                        decision["reason"],
-                        utc_now()
+                        prices[symbol],
+                        prices
                     )
 
-                    if decision["action"] == "PAPER_BUY_CANDIDATE":
-
-                        atr = frames["15m"].get("atr")
-
-                        if (
-                            isinstance(atr, bool)
-                            or not isinstance(atr, (int, float))
-                            or not math.isfinite(atr)
-                            or atr <= 0
-                        ):
-                            decision["opened"] = False
-                            decision["reason"] = (
-                                "Invalid ATR: paper entry rejected"
-                            )
-                        else:
-                            decision["opened"] = (
-                                self.paper.open_position(
-                                    symbol,
-                                    prices[symbol],
-                                    atr,
-                                    prices=prices
-                                )
-                            )
-
-                    results.append({
-                        "symbol": symbol,
-                        **decision,
-                        "ai": ai
-                    })
+                    results.append(result)
 
                 except Exception as exc:
-                    self.last_error = f"{symbol}: {exc}"
+                    message = (
+                        f"{symbol} analysis failed: {exc}"
+                    )
+
+                    errors.append(message)
 
                     logger.exception(
                         "Analysis failed for %s",
                         symbol
                     )
 
-                    self._log_event(
-                        "ERROR",
-                        self.last_error
-                    )
+                    self._log_event("ERROR", message)
 
             self.last_prices = prices.copy()
 
+            # Always update existing paper positions when prices exist,
+            # even if another symbol's analysis failed.
             if prices:
                 try:
-                    self.paper.update(prices)
+                    closed = self.paper.update(prices)
+
+                    if closed:
+                        logger.info(
+                            "Paper positions closed: %s",
+                            closed
+                        )
+
                 except Exception as exc:
-                    self.last_error = (
+                    message = (
                         f"Portfolio update failed: {exc}"
                     )
+
+                    errors.append(message)
 
                     logger.exception(
                         "Portfolio update failed"
                     )
 
-                    self._log_event(
-                        "ERROR",
-                        self.last_error
-                    )
+                    self._log_event("ERROR", message)
 
             self.last_scan = utc_now()
 
-            if market_errors:
-                self.last_error = (
-                    "One or more market data requests failed"
-                )
+            if errors:
+                self.last_error = " | ".join(errors)[:1000]
             elif not results:
-                self.last_error = (
-                    self.last_error or "No successful analysis results"
-                )
+                self.last_error = "No successful analysis results"
             else:
                 self.last_error = None
 
             return results
 
     async def run_loop(self):
+        """Background scanning loop."""
 
         while self.running:
 
@@ -311,15 +365,8 @@ class TradingEngine:
                 raise
 
             except Exception as exc:
-                self.last_error = str(exc)
-
-                logger.exception(
-                    "AI QUANT engine loop error"
-                )
-
-                self._log_event(
-                    "ERROR",
-                    self.last_error
+                self._set_error(
+                    f"Engine loop error: {exc}"
                 )
 
             try:
