@@ -1,39 +1,4 @@
-import math
-import os
-from urllib.parse import urlparse
 
-
-# ============================================================
-# APPLICATION
-# ============================================================
-
-APP_NAME = "AI QUANT"
-APP_VERSION = "3.1.0"
-
-# Permanently restricted to simulated trading.
-PAPER_MODE = True
-
-
-# ============================================================
-# SERVER
-# ============================================================
-
-HOST = os.getenv("HOST", "0.0.0.0").strip()
-
-try:
-    PORT = int(os.getenv("PORT", "7860"))
-except (TypeError, ValueError, OverflowError):
-    PORT = 7860
-
-
-# ============================================================
-# DATABASE
-# ============================================================
-
-DB_PATH = os.getenv("DB_PATH", "ai_quant.db").strip()
-
-
-# ============================================================
 # MARKET DATA - BINGX
 # ============================================================
 
