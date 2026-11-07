@@ -1,9 +1,11 @@
 
 """Advanced asynchronous orchestration for AI QUANT.
-Paper trading only. No real order execution.
+Educational paper simulation only. No real order execution.
 """
+
 import asyncio
 import logging
+import math
 from datetime import datetime, timezone
 
 import config
@@ -31,9 +33,16 @@ if isinstance(TIMEFRAMES, str):
 SCAN_INTERVAL_SECONDS = config.SCAN_INTERVAL_SECONDS
 
 
+def utc_now():
+    return datetime.now(timezone.utc).isoformat()
+
+
 class TradingEngine:
 
     def __init__(self, db):
+        if db is None:
+            raise ValueError("Database instance is required")
+
         self.db = db
 
         self.market = BingXMarketData()
@@ -49,53 +58,87 @@ class TradingEngine:
         self.last_prices = {}
 
         self.scan_lock = asyncio.Lock()
+        self.lifecycle_lock = asyncio.Lock()
+
+    def _log_event(self, level, message):
+        try:
+            self.db.log_event(
+                level,
+                str(message)[:1000],
+                utc_now()
+            )
+        except Exception:
+            logger.exception("Could not write database event")
 
     async def start(self):
+        async with self.lifecycle_lock:
 
-        if self.running:
-            return
+            if self.running:
+                return
 
-        await self.market.start()
-        await self.ai.start()
-        await self.news.start()
+            started = []
 
-        self.running = True
+            try:
+                for component in (
+                    self.market,
+                    self.ai,
+                    self.news
+                ):
+                    await component.start()
+                    started.append(component)
 
-        if self.task is None or self.task.done():
-            self.task = asyncio.create_task(
-                self.run_loop()
-            )
+                self.running = True
 
-        logger.info("AI QUANT engine started.")
+                if self.task is None or self.task.done():
+                    self.task = asyncio.create_task(
+                        self.run_loop(),
+                        name="ai-quant-engine"
+                    )
+
+                logger.info("AI QUANT engine started.")
+
+            except Exception:
+                self.running = False
+
+                for component in reversed(started):
+                    try:
+                        await component.close()
+                    except Exception:
+                        logger.exception(
+                            "Startup cleanup failed"
+                        )
+
+                raise
 
     async def stop(self):
+        async with self.lifecycle_lock:
 
-        self.running = False
+            self.running = False
 
-        if self.task is not None:
-            self.task.cancel()
+            if self.task is not None:
+                self.task.cancel()
 
-            await asyncio.gather(
-                self.task,
-                return_exceptions=True
-            )
-
-            self.task = None
-
-        for component in (
-            self.market,
-            self.ai,
-            self.news
-        ):
-            try:
-                await component.close()
-            except Exception:
-                logger.exception(
-                    "Error closing %s",
-                    component.__class__.__name__
+                await asyncio.gather(
+                    self.task,
+                    return_exceptions=True
                 )
 
-        logger.info("AI QUANT engine stopped.")
+                self.task = None
+
+            for component in (
+                self.market,
+                self.ai,
+                self.news
+            ):
+                try:
+                    await component.close()
+                except Exception:
+                    logger.exception(
+                        "Error closing %s",
+                        component.__class__.__name__
+                    )
+
+            logger.info("AI QUANT engine stopped.")
 
     async def scan_once(self):
 
@@ -105,88 +148,70 @@ class TradingEngine:
             results = []
             market_errors = {}
 
-            timestamp = datetime.now(
-                timezone.utc
-            ).isoformat()
-
-            # Fetch all market prices first.
             for symbol in SYMBOLS:
 
                 try:
-                    ticker = await self.market.ticker(
-                        symbol
-                    )
+                    ticker = await self.market.ticker(symbol)
 
                     price = float(ticker["last"])
 
-                    if price <= 0:
-                        raise ValueError(
-                            "Invalid market price"
-                        )
+                    if not math.isfinite(price) or price <= 0:
+                        raise ValueError("Invalid market price")
 
                     prices[symbol] = price
 
                 except Exception as exc:
-
                     market_errors[symbol] = str(exc)
 
-                    self.last_error = (
-                        f"{symbol}: {exc}"
-                    )
+                    self.last_error = f"{symbol}: {exc}"
 
                     logger.exception(
                         "Ticker error: %s",
                         symbol
                     )
 
-                    self.db.log_event(
+                    self._log_event(
                         "ERROR",
-                        self.last_error,
-                        timestamp
+                        self.last_error
                     )
 
-            # Analyze each available symbol.
             for symbol in SYMBOLS:
 
                 if symbol not in prices:
                     continue
 
                 try:
-
                     frames = {}
 
                     for timeframe in TIMEFRAMES:
-
                         candles = await self.market.klines(
                             symbol,
                             timeframe
                         )
 
-                        frames[timeframe] = (
-                            calculate_indicators(
-                                candles
-                            )
+                        frames[timeframe] = calculate_indicators(
+                            candles
                         )
 
-                    if not frames:
-                        continue
+                    if any(
+                        timeframe not in frames
+                        for timeframe in ("15m", "1h", "4h")
+                    ):
+                        raise ValueError(
+                            "Required analysis timeframe missing"
+                        )
 
-                    # News protection.
-                    blocked = await self.news.blocks(
-                        symbol
-                    )
+                    blocked = await self.news.blocks(symbol)
 
-                    # AI consensus.
                     ai = await self.ai.vote({
                         "symbol": symbol,
                         "frames": frames
                     })
 
-                    # Advanced decision analysis.
                     decision = evaluate_setup(
                         frames,
-                        ai["vote"],
-                        ai["agreement"],
+                        ai.get("vote", "UNAVAILABLE"),
+                        ai.get("agreement", 0.0),
                         blocked
                     )
 
@@ -195,32 +220,32 @@ class TradingEngine:
                         decision["action"],
                         decision["score"],
                         decision["reason"],
-                        datetime.now(
-                            timezone.utc
-                        ).isoformat()
+                        utc_now()
                     )
 
-                    # Paper trading only.
                     if decision["action"] == "PAPER_BUY_CANDIDATE":
 
-                        preferred_frame = (
-                            "15m"
-                            if "15m" in frames
-                            else next(iter(frames))
-                        )
+                        atr = frames["15m"].get("atr")
 
-                        atr = frames[
-                            preferred_frame
-                        ]["atr"]
-
-                        opened = self.paper.open_position(
-                            symbol,
-                            prices[symbol],
-                            atr,
-                            prices=prices
-                        )
-
-                        decision["opened"] = opened
+                        if (
+                            isinstance(atr, bool)
+                            or not isinstance(atr, (int, float))
+                            or not math.isfinite(atr)
+                            or atr <= 0
+                        ):
+                            decision["opened"] = False
+                            decision["reason"] = (
+                                "Invalid ATR: paper entry rejected"
+                            )
+                        else:
+                            decision["opened"] = (
+                                self.paper.open_position(
+                                    symbol,
+                                    prices[symbol],
+                                    atr,
+                                    prices=prices
+                                )
+                            )
 
                     results.append({
                         "symbol": symbol,
@@ -229,35 +254,48 @@ class TradingEngine:
                     })
 
                 except Exception as exc:
-
-                    self.last_error = (
-                        f"{symbol}: {exc}"
-                    )
+                    self.last_error = f"{symbol}: {exc}"
 
                     logger.exception(
                         "Analysis failed for %s",
                         symbol
                     )
 
-                    self.db.log_event(
+                    self._log_event(
                         "ERROR",
-                        self.last_error,
-                        datetime.now(
-                            timezone.utc
-                        ).isoformat()
+                        self.last_error
                     )
 
-            # Update portfolio with current market prices.
             self.last_prices = prices.copy()
 
             if prices:
-                self.paper.update(prices)
+                try:
+                    self.paper.update(prices)
+                except Exception as exc:
+                    self.last_error = (
+                        f"Portfolio update failed: {exc}"
+                    )
 
-            self.last_scan = datetime.now(
-                timezone.utc
-            ).isoformat()
+                    logger.exception(
+                        "Portfolio update failed"
+                    )
 
-            if not market_errors and results:
+                    self._log_event(
+                        "ERROR",
+                        self.last_error
+                    )
+
+            self.last_scan = utc_now()
+
+            if market_errors:
+                self.last_error = (
+                    "One or more market data requests failed"
+                )
+            elif not results:
+                self.last_error = (
+                    self.last_error or "No successful analysis results"
+                )
+            else:
                 self.last_error = None
 
             return results
@@ -267,18 +305,21 @@ class TradingEngine:
         while self.running:
 
             try:
-
                 await self.scan_once()
 
             except asyncio.CancelledError:
                 raise
 
             except Exception as exc:
-
                 self.last_error = str(exc)
 
                 logger.exception(
                     "AI QUANT engine loop error"
+                )
+
+                self._log_event(
+                    "ERROR",
+                    self.last_error
                 )
 
             try:
@@ -290,7 +331,5 @@ class TradingEngine:
                 raise
 
 
-# Backward compatibility:
-# Other project files can import Engine or TradingEngine.
-
+# Backward compatibility.
 Engine = TradingEngine
