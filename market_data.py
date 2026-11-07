@@ -1,9 +1,8 @@
 
-"""Public BingX market-data client.
-
+"""AI QUANT 4.0 - BingX public market data client.
 Public market data only.
-No private keys and no exchange order functionality.
 Paper simulation support only.
+No private keys or exchange orders.
 """
 
 import asyncio
@@ -28,17 +27,9 @@ class BingXMarketData:
         self.last_error = None
         self._lock = asyncio.Lock()
 
-    # --------------------------------------------------
-    # HTTP session
-    # --------------------------------------------------
-
     async def start(self):
-        """Create an HTTP session safely."""
-
         async with self._lock:
-
             if self.session is None or self.session.closed:
-
                 timeout = aiohttp.ClientTimeout(
                     total=HTTP_TIMEOUT_SECONDS
                 )
@@ -60,52 +51,31 @@ class BingXMarketData:
                 )
 
     async def close(self):
-        """Close the HTTP session safely."""
-
         async with self._lock:
-
             session = self.session
             self.session = None
 
             if session is not None and not session.closed:
                 await session.close()
 
-    # --------------------------------------------------
-    # Validation helpers
-    # --------------------------------------------------
-
     @staticmethod
     def _positive_number(value):
         try:
-
             number = float(value)
-
-            return (
-                math.isfinite(number)
-                and number > 0
-            )
-
+            return math.isfinite(number) and number > 0
         except (TypeError, ValueError, OverflowError):
             return False
 
     @staticmethod
     def _nonnegative_number(value):
         try:
-
             number = float(value)
-
-            return (
-                math.isfinite(number)
-                and number >= 0
-            )
-
+            return math.isfinite(number) and number >= 0
         except (TypeError, ValueError, OverflowError):
             return False
 
     @staticmethod
     def normalize_symbol(symbol):
-        """Normalize a market symbol to BASE-USDT format."""
-
         symbol = (
             str(symbol)
             .strip()
@@ -114,9 +84,7 @@ class BingXMarketData:
         )
 
         if not symbol:
-            raise ValueError(
-                "Symbol cannot be empty"
-            )
+            raise ValueError("Symbol cannot be empty")
 
         if "-" not in symbol:
             symbol += "-USDT"
@@ -128,31 +96,20 @@ class BingXMarketData:
             or not parts[0]
             or not parts[1]
         ):
-            raise ValueError(
-                "Invalid market symbol"
-            )
+            raise ValueError("Invalid market symbol")
 
         return symbol
 
-    # --------------------------------------------------
-    # HTTP request
-    # --------------------------------------------------
-
     async def _request(self, path, params=None):
-        """Perform a public GET request."""
-
         if self.session is None or self.session.closed:
             await self.start()
 
         session = self.session
 
         if session is None or session.closed:
-            raise RuntimeError(
-                "HTTP session unavailable"
-            )
+            raise RuntimeError("HTTP session unavailable")
 
         try:
-
             async with session.get(
                 path,
                 params=params or {},
@@ -173,8 +130,7 @@ class BingXMarketData:
 
                 if code not in (None, 0, "0"):
                     raise RuntimeError(
-                        "BingX API error: "
-                        f"{data.get('msg', code)}"
+                        f"BingX API error: {data.get('msg', code)}"
                     )
 
                 if "data" not in data:
@@ -183,7 +139,6 @@ class BingXMarketData:
                     )
 
                 self.last_error = None
-
                 return data
 
         except (
@@ -196,41 +151,31 @@ class BingXMarketData:
             self.last_error = str(exc)
             raise
 
-    # --------------------------------------------------
     # Ticker
-    # --------------------------------------------------
 
     async def get_ticker(self, symbol):
-        """Get public 24-hour ticker data."""
-
         normalized = self.normalize_symbol(symbol)
 
         data = await self._request(
             BINGX_TICKER_PATH,
-            params={
-                "symbol": normalized,
-            },
+            params={"symbol": normalized},
         )
 
         result = data.get("data")
 
         if isinstance(result, list):
-
             if len(result) != 1:
                 raise ValueError(
                     "Unexpected ticker response"
                 )
-
             result = result[0]
 
         if not isinstance(result, dict):
-            raise ValueError(
-                "Invalid ticker data"
-            )
+            raise ValueError("Invalid ticker data")
 
         last = (
-            result.get("last")
-            or result.get("lastPrice")
+            result.get("lastPrice")
+            or result.get("last")
             or result.get("close")
         )
 
@@ -245,17 +190,12 @@ class BingXMarketData:
         return normalized_result
 
     async def ticker(self, symbol):
-        """Compatibility method used by TradingEngine."""
-
         return await self.get_ticker(symbol)
 
-    # --------------------------------------------------
-    # Kline normalization
-    # --------------------------------------------------
+    # Candle normalization
 
     @staticmethod
     def _normalize_candle(candle):
-        """Convert a candle into a standard OHLCV dictionary."""
 
         if isinstance(candle, dict):
 
@@ -267,21 +207,27 @@ class BingXMarketData:
                 "volume": candle.get("volume"),
             }
 
-            timestamp = (
-                candle.get("time")
-                or candle.get("timestamp")
-                or candle.get("openTime")
-            )
+            timestamp = None
+
+            for key in (
+                "time",
+                "timestamp",
+                "openTime",
+                "open_time",
+                "t",
+            ):
+                if candle.get(key) is not None:
+                    timestamp = candle[key]
+                    break
 
         elif isinstance(candle, (list, tuple)):
 
-            # Standard OHLCV array:
-            # [timestamp, open, high, low, close, volume]
+            # BingX format:
+            # [openTime, open, high, low, close, volume,
+            #  closeTime, quoteVolume]
 
             if len(candle) < 6:
-                raise ValueError(
-                    "Invalid candle array"
-                )
+                raise ValueError("Invalid candle array")
 
             timestamp = candle[0]
 
@@ -293,20 +239,16 @@ class BingXMarketData:
                 "volume": candle[5],
             }
 
+            if len(candle) >= 7:
+                normalized["close_time"] = candle[6]
+
+            if len(candle) >= 8:
+                normalized["quote_volume"] = candle[7]
+
         else:
+            raise ValueError("Unsupported candle format")
 
-            raise ValueError(
-                "Unsupported candle format"
-            )
-
-        # OHLC prices must be positive.
-        for key in (
-            "open",
-            "high",
-            "low",
-            "close",
-        ):
-
+        for key in ("open", "high", "low", "close"):
             value = normalized[key]
 
             if not BingXMarketData._positive_number(value):
@@ -316,17 +258,13 @@ class BingXMarketData:
 
             normalized[key] = float(value)
 
-        # Volume may legitimately be zero.
         volume = normalized["volume"]
 
         if not BingXMarketData._nonnegative_number(volume):
-            raise ValueError(
-                "Invalid candle field: volume"
-            )
+            raise ValueError("Invalid candle volume")
 
         normalized["volume"] = float(volume)
 
-        # Validate OHLC consistency.
         if (
             normalized["high"] < normalized["low"]
             or normalized["high"] < normalized["open"]
@@ -334,28 +272,34 @@ class BingXMarketData:
             or normalized["low"] > normalized["open"]
             or normalized["low"] > normalized["close"]
         ):
-
-            raise ValueError(
-                "Inconsistent candle OHLC values"
-            )
+            raise ValueError("Inconsistent candle OHLC values")
 
         if timestamp is not None:
-
             try:
-
-                normalized["time"] = int(timestamp)
-
+                timestamp = int(timestamp)
             except (TypeError, ValueError, OverflowError):
-
                 raise ValueError(
                     "Invalid candle timestamp"
                 ) from None
 
+            if timestamp < 0:
+                raise ValueError("Negative candle timestamp")
+
+            normalized["time"] = timestamp
+
+        if "close_time" in normalized:
+            try:
+                normalized["close_time"] = int(
+                    normalized["close_time"]
+                )
+            except (TypeError, ValueError, OverflowError):
+                raise ValueError(
+                    "Invalid candle close time"
+                ) from None
+
         return normalized
 
-    # --------------------------------------------------
     # Historical candles
-    # --------------------------------------------------
 
     async def get_klines(
         self,
@@ -363,7 +307,6 @@ class BingXMarketData:
         interval="15m",
         limit=None,
     ):
-        """Get normalized historical OHLCV candles."""
 
         normalized = self.normalize_symbol(symbol)
 
@@ -371,27 +314,20 @@ class BingXMarketData:
             not isinstance(interval, str)
             or interval not in TIMEFRAMES
         ):
-
             raise ValueError(
                 f"Unsupported timeframe: {interval}"
             )
 
         try:
-
             limit = (
                 KLINE_LIMIT
                 if limit is None
                 else int(limit)
             )
-
         except (TypeError, ValueError, OverflowError):
-
-            raise ValueError(
-                "Invalid kline limit"
-            ) from None
+            raise ValueError("Invalid kline limit") from None
 
         if not 1 <= limit <= 500:
-
             raise ValueError(
                 "Kline limit must be between 1 and 500"
             )
@@ -408,9 +344,7 @@ class BingXMarketData:
         result = data.get("data")
 
         if not isinstance(result, list):
-            raise ValueError(
-                "Invalid kline response"
-            )
+            raise ValueError("Invalid kline response")
 
         if not result:
             raise ValueError(
@@ -422,20 +356,18 @@ class BingXMarketData:
             for candle in result
         ]
 
-        # Sort chronologically when timestamps are available.
+        # Sort and remove duplicates.
         if all("time" in candle for candle in candles):
 
-            candles.sort(
-                key=lambda candle: candle["time"]
-            )
-
-            # Remove duplicate timestamps.
             unique = {}
 
             for candle in candles:
                 unique[candle["time"]] = candle
 
-            candles = list(unique.values())
+            candles = sorted(
+                unique.values(),
+                key=lambda candle: candle["time"],
+            )
 
         if len(candles) < 2:
             raise ValueError(
@@ -450,8 +382,6 @@ class BingXMarketData:
         interval="15m",
         limit=None,
     ):
-        """Compatibility method used by TradingEngine."""
-
         return await self.get_klines(
             symbol,
             interval,
