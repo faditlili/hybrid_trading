@@ -8,6 +8,8 @@ No real exchange orders are supported.
 
 import math
 import os
+import re
+
 from urllib.parse import urlparse
 
 
@@ -56,22 +58,49 @@ def env_float(name, default, minimum=None, maximum=None):
     return value
 
 
+def env_list(name, default=""):
+    """Read a comma-separated environment variable."""
+
+    raw = os.getenv(name, default)
+
+    if not isinstance(raw, str):
+        raise ValueError(
+            f"Invalid list configuration: {name}"
+        )
+
+    return tuple(
+        item.strip()
+        for item in raw.split(",")
+        if item.strip()
+    )
+
+
 def validate_https_url(name, value):
-    """Validate an external service URL."""
+    """Validate an external HTTPS service URL."""
 
     try:
         parsed = urlparse(value)
+        hostname = parsed.hostname
+
+        # Accessing port also validates malformed port values.
+        _ = parsed.port
+
     except Exception:
-        raise ValueError(f"Invalid URL: {name}") from None
+        raise ValueError(
+            f"Invalid URL: {name}"
+        ) from None
 
     if (
         parsed.scheme != "https"
-        or not parsed.hostname
+        or not hostname
         or parsed.username
         or parsed.password
+        or parsed.query
+        or parsed.fragment
     ):
         raise ValueError(
-            f"{name} must be a valid HTTPS URL"
+            f"{name} must be a valid HTTPS URL "
+            "without credentials, query or fragment"
         )
 
 
@@ -82,6 +111,7 @@ def validate_https_url(name, value):
 APP_NAME = "AI QUANT"
 APP_VERSION = "4.0.0"
 
+# This setting is deliberately not configurable.
 PAPER_MODE = True
 
 HOST = (
@@ -107,7 +137,9 @@ DB_PATH = os.getenv(
 ).strip()
 
 if not DB_PATH:
-    raise ValueError("DB_PATH cannot be empty")
+    raise ValueError(
+        "DB_PATH cannot be empty"
+    )
 
 
 # --------------------------------------------------
@@ -137,13 +169,9 @@ BINGX_KLINE_PATH = (
 # Market configuration
 # --------------------------------------------------
 
-SYMBOLS = tuple(
-    symbol.strip().upper()
-    for symbol in os.getenv(
-        "SYMBOLS",
-        "BTC-USDT,ETH-USDT,BNB-USDT,SOL-USDT,XRP-USDT",
-    ).split(",")
-    if symbol.strip()
+SYMBOLS = env_list(
+    "SYMBOLS",
+    "BTC-USDT,ETH-USDT,BNB-USDT,SOL-USDT,XRP-USDT",
 )
 
 TIMEFRAMES = (
@@ -198,7 +226,7 @@ PORTFOLIO_EXPOSURE_LIMIT = env_float(
     1.0,
 )
 
-# Maximum theoretical loss across ALL open positions.
+# Maximum theoretical risk across ALL open positions.
 # This is an aggregate portfolio limit, not a per-position limit.
 PORTFOLIO_RISK_FRACTION = env_float(
     "PORTFOLIO_RISK_FRACTION",
@@ -267,13 +295,9 @@ validate_https_url(
     HF_API_URL,
 )
 
-HF_MODELS = tuple(
-    model.strip()
-    for model in os.getenv(
-        "HF_MODELS",
-        "",
-    ).split(",")
-    if model.strip()
+HF_MODELS = env_list(
+    "HF_MODELS",
+    "",
 )
 
 AI_TIMEOUT_SECONDS = env_int(
@@ -339,6 +363,7 @@ DASHBOARD_REFRESH_SECONDS = env_int(
 # Configuration validation
 # --------------------------------------------------
 
+# Symbols must be unique and use BASE-USDT format.
 if not SYMBOLS:
     raise ValueError(
         "At least one market symbol is required"
@@ -349,13 +374,28 @@ if len(set(SYMBOLS)) != len(SYMBOLS):
         "Duplicate market symbols detected"
     )
 
-if any(
-    not symbol.endswith("-USDT")
-    or symbol.count("-") != 1
-    for symbol in SYMBOLS
-):
+for symbol in SYMBOLS:
+
+    if not re.fullmatch(
+        r"[A-Z0-9]+-USDT",
+        symbol
+    ):
+        raise ValueError(
+            f"Invalid market symbol: {symbol}. "
+            "Expected BASE-USDT format."
+        )
+
+
+# Validate the supported analysis timeframes.
+SUPPORTED_TIMEFRAMES = {
+    "15m",
+    "1h",
+    "4h",
+}
+
+if not TIMEFRAMES:
     raise ValueError(
-        "Symbols must use BASE-USDT format"
+        "At least one timeframe is required"
     )
 
 if len(set(TIMEFRAMES)) != len(TIMEFRAMES):
@@ -363,16 +403,41 @@ if len(set(TIMEFRAMES)) != len(TIMEFRAMES):
         "Duplicate timeframes detected"
     )
 
-if AI_MIN_MODELS > len(HF_MODELS) and HF_MODELS:
+if not set(TIMEFRAMES).issubset(
+    SUPPORTED_TIMEFRAMES
+):
     raise ValueError(
-        "AI_MIN_MODELS cannot exceed configured model count"
+        "Unsupported timeframe configured"
     )
 
+if not {
+    "15m",
+    "1h",
+    "4h",
+}.issubset(set(TIMEFRAMES)):
+    raise ValueError(
+        "15m, 1h and 4h are required"
+    )
+
+
+# AI council validation.
 if HF_TOKEN and not HF_MODELS:
     raise ValueError(
         "HF_MODELS must be configured when HF_TOKEN is provided"
     )
 
+if HF_TOKEN and AI_MIN_MODELS > len(HF_MODELS):
+    raise ValueError(
+        "AI_MIN_MODELS cannot exceed configured model count"
+    )
+
+if len(set(HF_MODELS)) != len(HF_MODELS):
+    raise ValueError(
+        "Duplicate AI models detected"
+    )
+
+
+# Portfolio validation.
 if not 0 < PORTFOLIO_EXPOSURE_LIMIT <= 1:
     raise ValueError(
         "Invalid portfolio exposure limit"
@@ -384,28 +449,44 @@ if not 0 < PORTFOLIO_RISK_FRACTION <= 1:
     )
 
 if not 0 <= FEE_RATE < 1:
-    raise ValueError("Invalid fee rate")
+    raise ValueError(
+        "Invalid fee rate"
+    )
 
 if not 0 <= SLIPPAGE_BPS <= 1000:
-    raise ValueError("Invalid slippage")
+    raise ValueError(
+        "Invalid slippage"
+    )
 
 if STOP_ATR_MULTIPLIER <= 0:
-    raise ValueError("Invalid stop multiplier")
+    raise ValueError(
+        "Invalid stop multiplier"
+    )
 
 if TARGET_R_MULTIPLIER <= 0:
-    raise ValueError("Invalid target multiplier")
+    raise ValueError(
+        "Invalid target multiplier"
+    )
 
+
+# AI validation.
 if not 0 <= AI_MIN_AGREEMENT <= 1:
     raise ValueError(
         "Invalid AI agreement threshold"
     )
 
+
+# Telegram validation.
 if bool(TELEGRAM_TOKEN) != bool(TELEGRAM_ADMIN_ID):
     raise ValueError(
-        "TELEGRAM_TOKEN and TELEGRAM_ADMIN_ID must be configured together"
+        "TELEGRAM_TOKEN and TELEGRAM_ADMIN_ID "
+        "must be configured together"
     )
 
-if TELEGRAM_ADMIN_ID and not TELEGRAM_ADMIN_ID.isdigit():
+if (
+    TELEGRAM_ADMIN_ID
+    and not TELEGRAM_ADMIN_ID.isdigit()
+):
     raise ValueError(
         "TELEGRAM_ADMIN_ID must contain digits only"
     )
