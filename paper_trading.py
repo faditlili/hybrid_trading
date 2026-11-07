@@ -1,6 +1,9 @@
 
 """Paper-only portfolio accounting.
+
 No exchange order functionality exists here.
+All positions are simulated.
+Aggregate theoretical portfolio risk is capped at 10%.
 """
 
 import math
@@ -10,17 +13,19 @@ import config
 
 
 PORTFOLIO_RISK_FRACTION = config.PORTFOLIO_RISK_FRACTION
-
 PORTFOLIO_EXPOSURE_LIMIT = config.PORTFOLIO_EXPOSURE_LIMIT
 MAX_OPEN_POSITIONS = config.MAX_OPEN_POSITIONS
+
 FEE_RATE = config.FEE_RATE
 SLIPPAGE_BPS = config.SLIPPAGE_BPS
+
 STOP_ATR_MULTIPLIER = config.STOP_ATR_MULTIPLIER
 TARGET_R_MULTIPLIER = config.TARGET_R_MULTIPLIER
 
+SLIPPAGE_RATE = SLIPPAGE_BPS / 10000.0
+
 
 class PaperTrader:
-
     def __init__(self, db):
         self.db = db
 
@@ -28,48 +33,192 @@ class PaperTrader:
     def now():
         return datetime.now(timezone.utc).isoformat()
 
+    @staticmethod
+    def _valid_positive(value):
+        try:
+            value = float(value)
+            return math.isfinite(value) and value > 0
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+    def _mark_price(self, symbol, entry, prices):
+        """Return a valid current mark price."""
+
+        if symbol not in prices:
+            return float(entry)
+
+        value = prices[symbol]
+
+        if not self._valid_positive(value):
+            raise ValueError(
+                f"Invalid market price for {symbol}"
+            )
+
+        return float(value)
+
+    def _position_risk(self, position):
+        """Estimate one open position's loss at its stop.
+
+        Includes its original entry fee and estimated exit
+        slippage and fee.
+        """
+
+        qty = float(position["qty"])
+        entry = float(position["entry"])
+        stop = float(position["stop"])
+        entry_fee = float(position["entry_fee"])
+
+        values = (qty, entry, stop, entry_fee)
+
+        if not all(math.isfinite(x) for x in values):
+            raise ValueError("Invalid open-position risk data")
+
+        if qty <= 0 or entry <= 0 or stop <= 0:
+            raise ValueError("Invalid open position")
+
+        if stop >= entry or entry_fee < 0:
+            raise ValueError("Invalid stop or entry fee")
+
+        estimated_exit = stop * (1 - SLIPPAGE_RATE)
+
+        estimated_exit_proceeds = (
+            estimated_exit * qty * (1 - FEE_RATE)
+        )
+
+        entry_cost = entry * qty + entry_fee
+
+        risk = entry_cost - estimated_exit_proceeds
+
+        if not math.isfinite(risk) or risk <= 0:
+            raise ValueError("Invalid position risk")
+
+        return risk
+
+    def _portfolio_values(self, account, positions, prices):
+        """Calculate equity, exposure and aggregate open risk."""
+
+        cash = float(account["cash"])
+
+        if not math.isfinite(cash) or cash < 0:
+            raise ValueError("Invalid portfolio cash")
+
+        market_value = 0.0
+        aggregate_risk = 0.0
+
+        for position in positions:
+            qty = float(position["qty"])
+            entry = float(position["entry"])
+
+            if not math.isfinite(qty) or qty <= 0:
+                raise ValueError("Invalid position quantity")
+
+            mark = self._mark_price(
+                position["symbol"],
+                entry,
+                prices,
+            )
+
+            market_value += qty * mark
+            aggregate_risk += self._position_risk(position)
+
+        equity = cash + market_value
+
+        if not all(
+            math.isfinite(x)
+            for x in (equity, market_value, aggregate_risk)
+        ):
+            raise ValueError("Invalid portfolio valuation")
+
+        return equity, market_value, aggregate_risk
+
+    # --------------------------------------------------
+    # Portfolio information
+    # --------------------------------------------------
+
     def equity(self, prices=None):
-        """Current total portfolio value including unrealized P/L."""
+        """Current portfolio equity including unrealized P/L."""
 
         prices = prices or {}
+
         account = self.db.account()
         positions = self.db.positions()
 
-        market_value = sum(
-            p["qty"] * float(
-                prices.get(p["symbol"], p["entry"])
-            )
-            for p in positions
+        equity, _, _ = self._portfolio_values(
+            account,
+            positions,
+            prices,
         )
 
-        return float(account["cash"]) + market_value
+        return equity
 
     def exposure(self, prices=None):
         """Current market value of all open positions."""
 
         prices = prices or {}
 
+        account = self.db.account()
+        positions = self.db.positions()
+
+        _, exposure, _ = self._portfolio_values(
+            account,
+            positions,
+            prices,
+        )
+
+        return exposure
+
+    def total_open_risk(self):
+        """Total theoretical risk of all open positions."""
+
+        positions = self.db.positions()
+
         return sum(
-            p["qty"] * float(
-                prices.get(p["symbol"], p["entry"])
-            )
-            for p in self.db.positions()
+            self._position_risk(position)
+            for position in positions
         )
 
     def risk_budget(self, prices=None):
-        """10% of current total portfolio equity."""
+        """Maximum aggregate risk based on current equity."""
+
+        equity = self.equity(prices)
 
         return max(
             0.0,
-            self.equity(prices) * PORTFOLIO_RISK_FRACTION
+            equity * PORTFOLIO_RISK_FRACTION,
         )
 
+    def remaining_risk(self, prices=None):
+        """Risk budget remaining after existing open positions."""
+
+        prices = prices or {}
+
+        account = self.db.account()
+        positions = self.db.positions()
+
+        equity, _, aggregate_risk = self._portfolio_values(
+            account,
+            positions,
+            prices,
+        )
+
+        budget = equity * PORTFOLIO_RISK_FRACTION
+
+        return max(0.0, budget - aggregate_risk)
+
+    # --------------------------------------------------
+    # Open simulated position
+    # --------------------------------------------------
+
     def open_position(self, symbol, price, atr, prices=None):
-        """Open a simulated position using portfolio-based risk sizing."""
+        """Open a simulated position within aggregate portfolio limits."""
 
         try:
+            symbol = str(symbol).strip().upper()
             price = float(price)
             atr = float(atr)
+
+            if not symbol:
+                return False
 
             if not all(
                 math.isfinite(x) and x > 0
@@ -79,48 +228,13 @@ class PaperTrader:
 
             prices = prices or {}
 
-            positions = self.db.positions()
+            fill = price * (1 + SLIPPAGE_RATE)
 
-            if len(positions) >= MAX_OPEN_POSITIONS:
-                return False
-
-            if any(
-                p["symbol"] == symbol
-                for p in positions
-            ):
-                return False
-
-            equity = self.equity(prices)
-            cash = float(self.db.account()["cash"])
-
-            if equity <= 0 or cash <= 0:
-                return False
-
-            # Portfolio exposure limit.
-            current_exposure = self.exposure(prices)
-
-            exposure_cap = (
-                equity * PORTFOLIO_EXPOSURE_LIMIT
-            )
-
-            remaining_exposure = (
-                exposure_cap - current_exposure
-            )
-
-            if remaining_exposure <= 0:
-                return False
-
-            # Simulated entry price including slippage.
-            slippage = SLIPPAGE_BPS / 10000
-
-            fill = price * (1 + slippage)
-
-            # Stop-loss and take-profit.
             stop = (
                 fill - STOP_ATR_MULTIPLIER * atr
             )
 
-            if stop <= 0 or stop >= fill:
+            if not math.isfinite(stop) or stop <= 0 or stop >= fill:
                 return False
 
             target = (
@@ -128,8 +242,7 @@ class PaperTrader:
                 + (fill - stop) * TARGET_R_MULTIPLIER
             )
 
-            # Calculate actual loss per unit if stop is reached.
-            stop_fill = stop * (1 - slippage)
+            stop_fill = stop * (1 - SLIPPAGE_RATE)
 
             loss_per_unit = (
                 fill * (1 + FEE_RATE)
@@ -142,74 +255,167 @@ class PaperTrader:
             ):
                 return False
 
-            # Dynamic risk budget based on total equity.
-            risk_budget = (
-                equity * PORTFOLIO_RISK_FRACTION
-            )
-
-            risk_quantity = (
-                risk_budget / loss_per_unit
-            )
-
-            # Exposure constraint, including entry fee.
-            max_exposure_notional = (
-                remaining_exposure
-                / (
-                    1
-                    + PORTFOLIO_EXPOSURE_LIMIT
-                    * FEE_RATE
-                )
-            )
-
-            # Available cash constraint.
-            max_cash_notional = (
-                cash / (1 + FEE_RATE)
-            )
-
-            # Final position size must satisfy all limits.
-            notional = min(
-                risk_quantity * fill,
-                max_exposure_notional,
-                max_cash_notional
-            )
-
-            if notional < 1:
-                return False
-
-            qty = notional / fill
-            fee = notional * FEE_RATE
-
-            if qty <= 0:
-                return False
-
-            # Atomic database transaction.
+            # All critical checks are repeated using fresh
+            # database state inside one atomic transaction.
             with self.db.lock:
-
                 try:
-                    self.db.conn.execute(
-                        "BEGIN IMMEDIATE"
-                    )
+                    self.db.conn.execute("BEGIN IMMEDIATE")
 
-                    account = self.db.conn.execute(
-                        "SELECT cash FROM account WHERE id=1"
+                    account_row = self.db.conn.execute(
+                        """
+                        SELECT cash
+                        FROM account
+                        WHERE id = 1
+                        """
                     ).fetchone()
 
-                    if (
-                        account is None
-                        or account[0] < notional + fee
+                    if account_row is None:
+                        self.db.conn.rollback()
+                        return False
+
+                    cash = float(account_row[0])
+
+                    rows = self.db.conn.execute(
+                        """
+                        SELECT
+                            id,
+                            symbol,
+                            qty,
+                            entry,
+                            stop,
+                            target,
+                            notional,
+                            entry_fee,
+                            opened_at
+                        FROM positions
+                        """
+                    ).fetchall()
+
+                    positions = [
+                        dict(row)
+                        for row in rows
+                    ]
+
+                    if len(positions) >= MAX_OPEN_POSITIONS:
+                        self.db.conn.rollback()
+                        return False
+
+                    if any(
+                        position["symbol"] == symbol
+                        for position in positions
                     ):
                         self.db.conn.rollback()
                         return False
 
+                    account = {"cash": cash}
+
+                    equity, current_exposure, current_risk = (
+                        self._portfolio_values(
+                            account,
+                            positions,
+                            prices,
+                        )
+                    )
+
+                    if equity <= 0 or cash <= 0:
+                        self.db.conn.rollback()
+                        return False
+
+                    # Aggregate risk limit:
+                    # New position may use only the remaining budget.
+                    risk_cap = (
+                        equity * PORTFOLIO_RISK_FRACTION
+                    )
+
+                    remaining_risk = risk_cap - current_risk
+
+                    if remaining_risk <= 0:
+                        self.db.conn.rollback()
+                        return False
+
+                    # Independent market exposure limit.
+                    exposure_cap = (
+                        equity * PORTFOLIO_EXPOSURE_LIMIT
+                    )
+
+                    remaining_exposure = (
+                        exposure_cap - current_exposure
+                    )
+
+                    if remaining_exposure <= 0:
+                        self.db.conn.rollback()
+                        return False
+
+                    risk_quantity = (
+                        remaining_risk / loss_per_unit
+                    )
+
+                    max_risk_notional = (
+                        risk_quantity * fill
+                    )
+
+                    max_exposure_notional = (
+                        remaining_exposure
+                    )
+
+                    max_cash_notional = (
+                        cash / (1 + FEE_RATE)
+                    )
+
+                    notional = min(
+                        max_risk_notional,
+                        max_exposure_notional,
+                        max_cash_notional,
+                    )
+
+                    if (
+                        not math.isfinite(notional)
+                        or notional < 1.0
+                    ):
+                        self.db.conn.rollback()
+                        return False
+
+                    qty = notional / fill
+                    entry_fee = notional * FEE_RATE
+
+                    if (
+                        not math.isfinite(qty)
+                        or qty <= 0
+                        or notional + entry_fee > cash
+                    ):
+                        self.db.conn.rollback()
+                        return False
+
+                    # Final risk verification before insertion.
+                    new_position_risk = (
+                        qty * loss_per_unit
+                    )
+
+                    if (
+                        current_risk + new_position_risk
+                        > risk_cap + 1e-9
+                    ):
+                        self.db.conn.rollback()
+                        return False
+
+                    if (
+                        current_exposure + notional
+                        > exposure_cap + 1e-9
+                    ):
+                        self.db.conn.rollback()
+                        return False
+
+                    # Debit simulated cash.
                     self.db.conn.execute(
                         """
                         UPDATE account
                         SET cash = cash - ?
                         WHERE id = 1
                         """,
-                        (notional + fee,)
+                        (notional + entry_fee,),
                     )
 
+                    # Create simulated position.
                     self.db.conn.execute(
                         """
                         INSERT INTO positions
@@ -232,11 +438,12 @@ class PaperTrader:
                             stop,
                             target,
                             notional,
-                            fee,
-                            self.now()
-                        )
+                            entry_fee,
+                            self.now(),
+                        ),
                     )
 
+                    # Record simulated buy.
                     self.db.conn.execute(
                         """
                         INSERT INTO trades
@@ -257,11 +464,11 @@ class PaperTrader:
                             "PAPER_BUY",
                             qty,
                             fill,
-                            0,
-                            fee,
+                            0.0,
+                            entry_fee,
                             self.now(),
-                            "Portfolio risk-based paper entry"
-                        )
+                            "Aggregate portfolio risk-based paper entry",
+                        ),
                     )
 
                     self.db.conn.commit()
@@ -275,59 +482,91 @@ class PaperTrader:
         except (TypeError, ValueError, OverflowError):
             return False
 
-    def update(self, prices):
-        """Update open positions and simulate stop/target exits."""
+    # --------------------------------------------------
+    # Update and close simulated positions
+    # --------------------------------------------------
 
+    def update(self, prices):
+        """Update positions and simulate stop/target exits."""
+
+        prices = prices or {}
         closed = []
 
         for position in self.db.positions():
-
             symbol = position["symbol"]
-            price = prices.get(symbol)
 
-            if price is None:
+            if symbol not in prices:
                 continue
 
             try:
-                price = float(price)
+                price = float(prices[symbol])
 
                 if not math.isfinite(price) or price <= 0:
                     continue
 
-                entry = float(position["entry"])
-                qty = float(position["qty"])
                 stop = float(position["stop"])
                 target = float(position["target"])
-                entry_fee = float(position["entry_fee"])
 
-                if price > stop and price < target:
+                if stop <= 0 or target <= stop:
                     continue
 
-                # Conservative simulated exit with slippage.
-                fill = price * (
-                    1 - SLIPPAGE_BPS / 10000
-                )
+                # Stop exit: account for adverse price gaps.
+                if price <= stop:
+                    trigger_price = min(price, stop)
+                    reason = "PAPER_STOP_LOSS"
+
+                # Target exit: do not assume a better fill
+                # than the configured target.
+                elif price >= target:
+                    trigger_price = target
+                    reason = "PAPER_TAKE_PROFIT"
+
+                else:
+                    continue
+
+                fill = trigger_price * (1 - SLIPPAGE_RATE)
+
+                if not math.isfinite(fill) or fill <= 0:
+                    continue
+
+                qty = float(position["qty"])
+                entry = float(position["entry"])
+                entry_fee = float(position["entry_fee"])
+
+                if (
+                    not all(
+                        math.isfinite(x)
+                        for x in (qty, entry, entry_fee)
+                    )
+                    or qty <= 0
+                    or entry <= 0
+                    or entry_fee < 0
+                ):
+                    continue
 
                 gross = (fill - entry) * qty
-
                 exit_fee = fill * qty * FEE_RATE
 
-                pnl = (
-                    gross
-                    - entry_fee
-                    - exit_fee
-                )
-
-                proceeds = (
-                    fill * qty - exit_fee
-                )
+                pnl = gross - entry_fee - exit_fee
+                proceeds = fill * qty - exit_fee
 
                 with self.db.lock:
-
                     try:
-                        self.db.conn.execute(
-                            "BEGIN IMMEDIATE"
-                        )
+                        self.db.conn.execute("BEGIN IMMEDIATE")
+
+                        # Ensure the position still exists.
+                        existing = self.db.conn.execute(
+                            """
+                            SELECT id
+                            FROM positions
+                            WHERE id = ?
+                            """,
+                            (position["id"],),
+                        ).fetchone()
+
+                        if existing is None:
+                            self.db.conn.rollback()
+                            continue
 
                         self.db.conn.execute(
                             """
@@ -336,7 +575,7 @@ class PaperTrader:
                                 realized_pnl = realized_pnl + ?
                             WHERE id = 1
                             """,
-                            (proceeds, pnl)
+                            (proceeds, pnl),
                         )
 
                         self.db.conn.execute(
@@ -344,7 +583,7 @@ class PaperTrader:
                             DELETE FROM positions
                             WHERE id = ?
                             """,
-                            (position["id"],)
+                            (position["id"],),
                         )
 
                         self.db.conn.execute(
@@ -370,8 +609,8 @@ class PaperTrader:
                                 pnl,
                                 exit_fee,
                                 self.now(),
-                                "Stop/target paper simulation"
-                            )
+                                reason,
+                            ),
                         )
 
                         self.db.conn.commit()
@@ -379,7 +618,8 @@ class PaperTrader:
                         closed.append({
                             "symbol": symbol,
                             "pnl": pnl,
-                            "exit_price": fill
+                            "exit_price": fill,
+                            "reason": reason,
                         })
 
                     except Exception:
