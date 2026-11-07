@@ -1,48 +1,44 @@
-
 services:
-  - type: web
-    name: ai-quant
-    runtime: docker
-    plan: free
 
-    dockerfilePath: ./Dockerfile
-    dockerContext: .
-
-    healthCheckPath: /health
-    autoDeploy: true
-
-    envVars:
-      - key: HOST
-        value: 0.0.0.0
-
-      - key: DB_PATH
-        value: /data/ai_quant.db
-
-      - key: PAPER_MODE
-        value: "True"
-
-      - key: PYTHONUNBUFFERED
-        value: "1"
-
-      - key: PYTHONDONTWRITEBYTECODE
-        value: "1"
-
-      - key: SCAN_INTERVAL_SECONDS
-        value: "180"
-
-      - key: TIMEFRAME
-        value: 15m
-
-      - key: KLINE_LIMIT
-        value: "300"
-
-      - key: MIN_SCORE_TO_ENTER
-        value: "72"
-
-      - key: DASHBOARD_HTTP_TIMEOUT
-        value: "8"
-
-    disk:
-      name: ai-quant-data
-      mountPath: /data
-      sizeGB: 1
+- type: web
+  name: ai-quant
+  runtime: docker
+  plan: free
+  
+  dockerfilePath: ./Dockerfile
+  dockerContext: .
+  
+  healthCheckPath: /health
+  autoDeploy: true
+  
+  envVars:
+  
+  - key: HOST
+    value: 0.0.0.0
+  
+  - key: DB_PATH
+    value: /tmp/ai_quant.db
+  
+  - key: PAPER_MODE
+    value: "True"
+  
+  - key: PYTHONUNBUFFERED
+    value: "1"
+  
+  - key: PYTHONDONTWRITEBYTECODE
+    value: "1"
+  
+  - key: SCAN_INTERVAL_SECONDS
+    value: "180"
+  
+  - key: TIMEFRAMES
+    value: 15m,1h,4h
+  
+  - key: KLINE_LIMIT
+    value: "300"
+  
+  - key: MIN_SCORE_TO_ENTER
+    value: "75"
+  
+  - key: DASHBOARD_HTTP_TIMEOUT
+    value: "8"
