@@ -1,8 +1,6 @@
-
-"""OHLCV validation and technical indicator calculations.
-
-Calculates EMA, RSI, MACD, ATR and volume indicators.
-Analysis only. No trading or exchange order functionality.
+"""AI QUANT 4.0 - Technical Analysis.
+OHLCV validation and indicator calculations.
+Paper trading analysis only.
 """
 
 import math
@@ -21,25 +19,24 @@ REQUIRED = (
 
 MIN_CANDLES = 200
 
+TIME_COLUMNS = (
+    "timestamp",
+    "time",
+    "open_time",
+    "openTime",
+    "ts",
+)
 
-# --------------------------------------------------
-# Numeric validation
-# --------------------------------------------------
 
 def _finite_number(value):
-    """Return True only for finite numeric values."""
     try:
         return math.isfinite(float(value))
     except (TypeError, ValueError, OverflowError):
         return False
 
 
-# --------------------------------------------------
-# OHLCV validation
-# --------------------------------------------------
-
 def validate_ohlcv(rows):
-    """Validate and normalize historical OHLCV candles."""
+    """Validate and normalize OHLCV candles."""
 
     if isinstance(rows, pd.DataFrame):
         frame = rows.copy()
@@ -53,12 +50,11 @@ def validate_ohlcv(rows):
         raise ValueError("No candle data provided")
 
     if not frame.columns.is_unique:
-        raise ValueError("Duplicate OHLCV column names")
+        raise ValueError("Duplicate column names")
 
     missing = [
-        column
-        for column in REQUIRED
-        if column not in frame.columns
+        col for col in REQUIRED
+        if col not in frame.columns
     ]
 
     if missing:
@@ -66,23 +62,56 @@ def validate_ohlcv(rows):
             f"Missing OHLCV columns: {missing}"
         )
 
+    # Sort by timestamp when available.
+    time_column = next(
+        (col for col in TIME_COLUMNS if col in frame.columns),
+        None,
+    )
+
+    if time_column is not None:
+        timestamps = frame[time_column]
+
+        numeric_time = pd.to_numeric(
+            timestamps,
+            errors="coerce",
+        )
+
+        if numeric_time.notna().all():
+            frame["_sort_time"] = numeric_time
+        else:
+            parsed_time = pd.to_datetime(
+                timestamps,
+                utc=True,
+                errors="coerce",
+            )
+
+            if parsed_time.isna().any():
+                raise ValueError("Invalid candle timestamps")
+
+            frame["_sort_time"] = parsed_time
+
+        frame = (
+            frame.sort_values("_sort_time", kind="stable")
+            .drop_duplicates(subset=[time_column], keep="last")
+            .drop(columns=["_sort_time"])
+        )
+
+    # Keep required OHLCV columns.
     frame = frame.loc[:, REQUIRED].copy()
 
-    # Convert columns to numeric values.
     for column in REQUIRED:
         frame[column] = pd.to_numeric(
             frame[column],
             errors="coerce",
         )
 
-    # Remove NaN and infinite values.
-    frame = frame.replace(
-        [np.inf, -np.inf],
-        np.nan,
-    ).dropna(subset=list(REQUIRED))
+    # Remove invalid numeric values.
+    frame = (
+        frame.replace([np.inf, -np.inf], np.nan)
+        .dropna(subset=list(REQUIRED))
+    )
 
-    # Prices must be positive.
-    # Volume may be zero, but never negative.
+    # Validate prices and volume.
     valid_values = (
         (frame["open"] > 0)
         & (frame["high"] > 0)
@@ -106,21 +135,15 @@ def validate_ohlcv(rows):
 
     if len(frame) < MIN_CANDLES:
         raise ValueError(
-            f"At least {MIN_CANDLES} valid candles are required; "
+            f"At least {MIN_CANDLES} valid candles required; "
             f"received {len(frame)}"
         )
 
-    frame = frame.reset_index(drop=True)
+    return frame.reset_index(drop=True)
 
-    return frame
-
-
-# --------------------------------------------------
-# Indicator calculations
-# --------------------------------------------------
 
 def calculate_indicators(rows):
-    """Calculate technical indicators from OHLCV candles."""
+    """Calculate EMA, RSI, MACD, ATR and volume indicators."""
 
     frame = validate_ohlcv(rows)
 
@@ -129,10 +152,7 @@ def calculate_indicators(rows):
     low = frame["low"]
     volume = frame["volume"]
 
-    # --------------------------------------------------
     # EMA
-    # --------------------------------------------------
-
     def ema(period):
         return close.ewm(
             span=period,
@@ -145,10 +165,7 @@ def calculate_indicators(rows):
     ema50 = ema(50)
     ema200 = ema(200)
 
-    # --------------------------------------------------
     # RSI - Wilder smoothing
-    # --------------------------------------------------
-
     delta = close.diff()
 
     gain = delta.clip(lower=0)
@@ -166,35 +183,26 @@ def calculate_indicators(rows):
         min_periods=14,
     ).mean()
 
-    rs = (
-        average_gain
-        / average_loss.replace(0, np.nan)
-    )
+    rs = average_gain / average_loss.replace(0, np.nan)
 
     rsi = 100 - (100 / (1 + rs))
 
-    # Rising market with no losses.
     rsi = rsi.mask(
         (average_loss == 0) & (average_gain > 0),
         100.0,
     )
 
-    # Falling market with no gains.
     rsi = rsi.mask(
         (average_gain == 0) & (average_loss > 0),
         0.0,
     )
 
-    # Completely flat market.
     rsi = rsi.mask(
         (average_gain == 0) & (average_loss == 0),
         50.0,
     )
 
-    # --------------------------------------------------
     # MACD
-    # --------------------------------------------------
-
     fast = close.ewm(
         span=12,
         adjust=False,
@@ -215,10 +223,7 @@ def calculate_indicators(rows):
         min_periods=9,
     ).mean()
 
-    # --------------------------------------------------
     # ATR - Wilder smoothing
-    # --------------------------------------------------
-
     previous_close = close.shift(1)
 
     true_range = pd.concat(
@@ -236,19 +241,13 @@ def calculate_indicators(rows):
         min_periods=14,
     ).mean()
 
-    # --------------------------------------------------
     # Volume
-    # --------------------------------------------------
-
     volume_avg = volume.rolling(
         window=20,
         min_periods=20,
     ).mean()
 
-    # --------------------------------------------------
     # Safe output conversion
-    # --------------------------------------------------
-
     def value(series):
         result = series.iloc[-1]
 
@@ -281,10 +280,7 @@ def calculate_indicators(rows):
         "candles": len(frame),
     }
 
-    # --------------------------------------------------
     # Final validation
-    # --------------------------------------------------
-
     required_indicators = (
         "price",
         "ema9",
