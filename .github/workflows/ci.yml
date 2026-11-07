@@ -1,26 +1,45 @@
+
 name: AI QUANT CI
 
 on:
-push:
-branches: [main]
-pull_request:
-branches: [main]
-workflow_dispatch:
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+
+  workflow_dispatch:
 
 permissions:
-contents: read
+  contents: read
 
 jobs:
-test:
-runs-on: ubuntu-latest
-steps:
-- uses: actions/checkout@v4
+  test:
+    runs-on: ubuntu-latest
 
-  - uses: actions/setup-python@v5
-    with:
-      python-version: '3.11'
+    timeout-minutes: 15
 
-  - run: python -m pip install --upgrade pip
-  - run: pip install -r requirements.txt
-  - run: python -m compileall -q .
-  - run: python -m unittest discover -s tests -v
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Compile Python files
+        run: python -m compileall -q .
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
