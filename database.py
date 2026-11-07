@@ -1,6 +1,9 @@
 
-"""SQLite persistence for AI QUANT.
-Paper trading only. Supports safe legacy database migration.
+"""SQLite persistence layer for AI QUANT.
+
+Paper trading only.
+Supports safe legacy migration, transactional updates,
+and thread-safe database access.
 """
 
 import logging
@@ -45,6 +48,7 @@ class Database:
 
                 if self.path != ":memory:":
                     self.conn.execute("PRAGMA journal_mode=WAL")
+                    self.conn.execute("PRAGMA synchronous=NORMAL")
 
                 self._initialize_schema()
 
@@ -78,8 +82,6 @@ class Database:
 
     @staticmethod
     def _first_value(item, *keys, default=None):
-        """Return the first present, non-None value."""
-
         for key in keys:
             value = item.get(key)
 
@@ -87,6 +89,19 @@ class Database:
                 return value
 
         return default
+
+    @staticmethod
+    def _valid_text(value):
+        if value is None:
+            return None
+
+        value = str(value).strip()
+
+        return value or None
+
+    def _ensure_open(self):
+        if self.conn is None:
+            raise RuntimeError("Database connection is closed")
 
     def _table_exists(self, table):
         row = self.conn.execute(
@@ -108,10 +123,7 @@ class Database:
             f'PRAGMA table_info("{table}")'
         ).fetchall()
 
-        return {
-            row["name"]
-            for row in rows
-        }
+        return {row["name"] for row in rows}
 
     def _rename_legacy_table(self, table):
         """Preserve an incompatible table under a unique backup name."""
@@ -131,12 +143,10 @@ class Database:
         return legacy_name
 
     # --------------------------------------------------
-    # Schema initialization and migration
+    # Schema initialization
     # --------------------------------------------------
 
     def _initialize_schema(self):
-        """Create current schema and safely migrate legacy tables."""
-
         legacy = {}
 
         expected = {
@@ -172,7 +182,6 @@ class Database:
 
         with self.conn:
 
-            # Rename incompatible tables before creating current schema.
             for table, required_columns in expected.items():
 
                 if not self._table_exists(table):
@@ -185,28 +194,17 @@ class Database:
 
             self._create_current_tables()
 
-            # Migrate account first.
             if "account" in legacy:
                 self._migrate_account(legacy["account"])
 
-            # Migrate open positions.
             if "positions" in legacy:
                 self._migrate_positions(legacy["positions"])
 
-            # Migrate trade history.
             if "trades" in legacy:
                 self._migrate_trades(legacy["trades"])
 
-            # Preserve legacy tables as backups.
-            if legacy:
-                logger.warning(
-                    "Legacy tables preserved as backups: %s",
-                    ", ".join(legacy.values()),
-                )
-
             self._create_indexes()
 
-            # Create the account only if it does not already exist.
             self.conn.execute(
                 """
                 INSERT OR IGNORE INTO account
@@ -219,8 +217,14 @@ class Database:
                 ),
             )
 
+        if legacy:
+            logger.warning(
+                "Legacy tables preserved as backups: %s",
+                ", ".join(legacy.values()),
+            )
+
     # --------------------------------------------------
-    # Current tables
+    # Current schema
     # --------------------------------------------------
 
     def _create_current_tables(self):
@@ -309,13 +313,13 @@ class Database:
         """)
 
     # --------------------------------------------------
-    # Legacy account migration
+    # Legacy migration
     # --------------------------------------------------
 
     def _migrate_account(self, legacy_table):
 
         row = self.conn.execute(
-            f'SELECT * FROM "{legacy_table}" WHERE id=1'
+            f'SELECT * FROM "{legacy_table}" LIMIT 1'
         ).fetchone()
 
         if row is None:
@@ -323,15 +327,13 @@ class Database:
 
         values = dict(row)
 
-        cash_value = self._first_value(
-            values,
-            "cash",
-            "balance",
-            default=STARTING_BALANCE,
-        )
-
         cash = self._safe_float(
-            cash_value,
+            self._first_value(
+                values,
+                "cash",
+                "balance",
+                default=STARTING_BALANCE,
+            ),
             STARTING_BALANCE,
         )
 
@@ -353,10 +355,6 @@ class Database:
             ),
         )
 
-    # --------------------------------------------------
-    # Legacy positions migration
-    # --------------------------------------------------
-
     def _migrate_positions(self, legacy_table):
 
         rows = self.conn.execute(
@@ -374,38 +372,22 @@ class Database:
             if status != "OPEN":
                 continue
 
-            symbol = item.get("symbol")
+            symbol = self._valid_text(item.get("symbol"))
 
             qty = self._safe_float(
-                self._first_value(
-                    item,
-                    "qty",
-                    "quantity",
-                )
+                self._first_value(item, "qty", "quantity")
             )
 
             entry = self._safe_float(
-                self._first_value(
-                    item,
-                    "entry",
-                    "entry_price",
-                )
+                self._first_value(item, "entry", "entry_price")
             )
 
             stop = self._safe_float(
-                self._first_value(
-                    item,
-                    "stop",
-                    "stop_loss",
-                )
+                self._first_value(item, "stop", "stop_loss")
             )
 
             target = self._safe_float(
-                self._first_value(
-                    item,
-                    "target",
-                    "take_profit",
-                )
+                self._first_value(item, "target", "take_profit")
             )
 
             if (
@@ -413,9 +395,8 @@ class Database:
                 or qty <= 0
                 or entry <= 0
                 or stop <= 0
-                or target <= 0
-                or stop >= entry
                 or target <= entry
+                or stop >= entry
             ):
                 logger.warning(
                     "Skipped invalid legacy position id=%s",
@@ -441,11 +422,12 @@ class Database:
                 0.0,
             )
 
+            # Do not reuse old IDs: this avoids collisions
+            # with positions already present in the new table.
             self.conn.execute(
                 """
                 INSERT INTO positions
                     (
-                        id,
                         symbol,
                         qty,
                         entry,
@@ -455,11 +437,10 @@ class Database:
                         entry_fee,
                         opened_at
                     )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    item.get("id"),
-                    str(symbol),
+                    symbol,
                     qty,
                     entry,
                     stop,
@@ -469,10 +450,6 @@ class Database:
                     opened_at,
                 ),
             )
-
-    # --------------------------------------------------
-    # Legacy trades migration
-    # --------------------------------------------------
 
     def _migrate_trades(self, legacy_table):
 
@@ -484,38 +461,27 @@ class Database:
 
             item = dict(row)
 
-            symbol = item.get("symbol")
-            side = item.get("side")
+            symbol = self._valid_text(item.get("symbol"))
+            side = self._valid_text(item.get("side"))
 
             qty = self._safe_float(
-                self._first_value(
-                    item,
-                    "qty",
-                    "quantity",
-                )
+                self._first_value(item, "qty", "quantity")
             )
 
-            price = self._safe_float(
-                item.get("price")
-            )
+            price = self._safe_float(item.get("price"))
 
-            if (
-                not symbol
-                or not side
-                or qty <= 0
-                or price <= 0
-            ):
+            if not symbol or not side or qty <= 0 or price <= 0:
                 logger.warning(
                     "Skipped invalid legacy trade id=%s",
                     item.get("id"),
                 )
                 continue
 
+            # Generate new IDs to avoid primary-key collisions.
             self.conn.execute(
                 """
                 INSERT INTO trades
                     (
-                        id,
                         symbol,
                         side,
                         qty,
@@ -525,12 +491,11 @@ class Database:
                         created_at,
                         reason
                     )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    item.get("id"),
-                    str(symbol),
-                    str(side),
+                    symbol,
+                    side,
                     qty,
                     price,
                     self._safe_float(item.get("pnl")),
@@ -553,15 +518,12 @@ class Database:
         if row is None:
             raise RuntimeError("Portfolio account is missing")
 
-        result = dict(row)
+        row["balance"] = row["cash"]
 
-        result["balance"] = result["cash"]
+        # Cash only. PaperTrader calculates mark-to-market equity.
+        row["equity"] = row["cash"]
 
-        # This is cash, not mark-to-market equity.
-        # PaperTrader.equity(prices) calculates total equity.
-        result["equity"] = result["cash"]
-
-        return result
+        return row
 
     def positions(self):
 
@@ -584,6 +546,8 @@ class Database:
         created_at=None,
     ):
 
+        score = self._safe_float(score)
+
         self.execute(
             """
             INSERT INTO decisions
@@ -591,10 +555,10 @@ class Database:
             VALUES (?, ?, ?, ?, ?)
             """,
             (
-                symbol,
-                action,
+                str(symbol),
+                str(action),
                 score,
-                reason,
+                str(reason or ""),
                 created_at or self.now(),
             ),
         )
@@ -626,6 +590,8 @@ class Database:
 
     def get_trades(self, limit=100):
 
+        limit = max(1, min(int(limit), 1000))
+
         return self.fetch_all(
             """
             SELECT *
@@ -633,10 +599,12 @@ class Database:
             ORDER BY id DESC
             LIMIT ?
             """,
-            (max(1, int(limit)),),
+            (limit,),
         )
 
     def get_decisions(self, limit=100):
+
+        limit = max(1, min(int(limit), 1000))
 
         return self.fetch_all(
             """
@@ -645,10 +613,12 @@ class Database:
             ORDER BY id DESC
             LIMIT ?
             """,
-            (max(1, int(limit)),),
+            (limit,),
         )
 
     def get_events(self, limit=100):
+
+        limit = max(1, min(int(limit), 1000))
 
         return self.fetch_all(
             """
@@ -657,7 +627,7 @@ class Database:
             ORDER BY id DESC
             LIMIT ?
             """,
-            (max(1, int(limit)),),
+            (limit,),
         )
 
     # --------------------------------------------------
@@ -667,29 +637,21 @@ class Database:
     def execute(self, query, params=()):
 
         with self.lock:
+            self._ensure_open()
 
-            if self.conn is None:
-                raise RuntimeError(
-                    "Database connection is closed"
-                )
+            try:
+                cursor = self.conn.execute(query, params)
+                self.conn.commit()
+                return cursor
 
-            cursor = self.conn.execute(
-                query,
-                params,
-            )
-
-            self.conn.commit()
-
-            return cursor
+            except Exception:
+                self.conn.rollback()
+                raise
 
     def fetch_one(self, query, params=()):
 
         with self.lock:
-
-            if self.conn is None:
-                raise RuntimeError(
-                    "Database connection is closed"
-                )
+            self._ensure_open()
 
             row = self.conn.execute(
                 query,
@@ -701,24 +663,26 @@ class Database:
     def fetch_all(self, query, params=()):
 
         with self.lock:
-
-            if self.conn is None:
-                raise RuntimeError(
-                    "Database connection is closed"
-                )
+            self._ensure_open()
 
             rows = self.conn.execute(
                 query,
                 params,
             ).fetchall()
 
-            return [
-                dict(row)
-                for row in rows
-            ]
+            return [dict(row) for row in rows]
+
+    # --------------------------------------------------
+    # Account updates
+    # --------------------------------------------------
 
     def update_account(self, balance, equity=None):
-        """Compatibility helper. Equity is calculated by PaperTrader."""
+        """Update simulated cash balance.
+
+        The equity argument is accepted for backward compatibility.
+        It is not stored because mark-to-market equity is calculated
+        from open positions by PaperTrader.
+        """
 
         balance = float(balance)
 
@@ -728,8 +692,9 @@ class Database:
         self.execute(
             """
             UPDATE account
-            SET cash=?, updated_at=?
-            WHERE id=1
+            SET cash = ?,
+                updated_at = ?
+            WHERE id = 1
             """,
             (
                 balance,
@@ -746,7 +711,6 @@ class Database:
         with self.lock:
 
             if self.conn is not None:
-
                 self.conn.close()
                 self.conn = None
 
