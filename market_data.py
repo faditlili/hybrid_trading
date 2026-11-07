@@ -1,171 +1,54 @@
-"""Asynchronous concurrent public REST collector pipeline tracking standard spot instruments."""
+"""Public BingX market-data client; contains no private/order endpoints."""
 import asyncio
-import json
-import logging
-from datetime import datetime, timezone
 import aiohttp
-import pandas as pd
-import config
+from config import BINGX_BASE_URL, BINGX_TICKER_PATH, BINGX_KLINE_PATH, HTTP_TIMEOUT_SECONDS, KLINE_LIMIT
 
-log = logging.getLogger(__name__)
 class BingXMarketData:
-    def __init__(self, session=None):
-        self._session = session
-        self._owned = session is None
-        self.last_success = None
+    def __init__(self):
+        self.session = None
         self.last_error = None
+
     async def start(self):
-        if self._session is None or self._session.closed:
-            timeout = aiohttp.ClientTimeout(
-                total=config.HTTP_TIMEOUT_SECONDS
-            )
-            self._session = aiohttp.ClientSession(
-                timeout=timeout, 
-                headers={"User-Agent": "AI-QUANT/4.0"}
-            )
-        return self
+        if self.session is None or self.session.closed:
+            timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS)
+            self.session = aiohttp.ClientSession(timeout=timeout, headers={"User-Agent":"AI-QUANT/4.0"})
+
     async def close(self):
-        if (
-            self._owned and self._session 
-            and not self._session.closed
-        ): 
-            await self._session.close()
-        self._session = None
+        if self.session and not self.session.closed: await self.session.close()
+        self.session = None
+
     async def _get(self, path, params):
         await self.start()
-        url = config.BINGX_BASE_URL + path
-        async with self._session.get(
-            url, params=params, 
-            allow_redirects=False
-        ) as r:
-            if r.status != 200:
-                raise RuntimeError(
-                    f"BingX HTTP {r.status}"
-                )
-            raw = await r.content.read(
-                1_048_577
-            )
-            if len(raw) > 1_048_576:
-                raise ValueError(
-                    "Response too large"
-                )
-            data = json.loads(raw)
-            if (
-                not isinstance(data, dict) 
-                or data.get("code", 0) 
-                not in (0, "0", None)
-            ):
-                raise ValueError(
-                    "BingX API anomaly"
-                )
-            self.last_success = (
-                datetime.now(timezone.utc)
-                .isoformat()
-            )
-            return data.get("data")
-    @staticmethod
-    def normalize_symbol(symbol):
-        s = (
-            str(symbol).upper()
-            .replace("/", "-")
-        )
-        if (
-            "-" not in s 
-            and s.endswith("USDT")
-        ):
-            s = s[:-4] + "-USDT"
-        return s
-    async def get_ticker(self, symbol):
-        symbol = self.normalize_symbol(
-            symbol
-        )
-        data = await self._get(
-            config.BINGX_TICKER_PATH,
-            {"symbol": symbol}
-        )
-        if isinstance(data, list):
-            data = next(
-                (
-                    x for x in data 
-                    if x.get("symbol") 
-                    == symbol
-                ), 
-                None
-            )
-        return {
-            "symbol": symbol,
-            "last": float(
-                data.get(
-                    "lastPrice", 
-                    data.get("last", 0)
-                )
-            ),
-            "quote_volume": float(
-                data.get("quoteVolume", 0)
-            ),
-            "change_pct": float(
-                data.get(
-                    "priceChangePercent", 0
-                )
-            )
-        }
-    async def get_klines(
-        self, symbol, 
-        interval=config.TIMEFRAME, 
-        limit=config.KLINE_LIMIT
-    ):
-        symbol = self.normalize_symbol(
-            symbol
-        )
-        raw_sym = symbol.replace(
-            "-", ""
-        )
-        data = await self._get(
-            config.BINGX_KLINE_PATH,
-            {
-                "symbol": raw_sym,
-                "interval": interval,
-                "limit": int(limit)
-            }
-        )
-        rows = []
-        for row in data:
-            if isinstance(row, dict):
-                vals = [
-                    row.get(k)
-                    for k in (
-                        "time", "open",
-                        "high", "low",
-                        "close", "volume"
-                    )
-                ]
-            else:
-                vals = row[:6]
-            rows.append(
-                [float(x) for x in vals]
-            )
-        return pd.DataFrame(
-            rows,
-            columns=[
-                "timestamp", "open",
-                "high", "low",
-                "close", "volume"
-            ]
-        )
-    async def snapshot(self, symbol):
-        ticker, candles = await asyncio.gather(
-            self.get_ticker(symbol),
-            self.get_klines(symbol)
-        )
-        return {
-            "ticker": ticker,
-            "candles": candles
-        }
+        try:
+            async with self.session.get(BINGX_BASE_URL + path, params=params) as response:
+                if response.status != 200: raise RuntimeError(f"BingX HTTP {response.status}")
+                payload = await response.json(content_type=None)
+                if not isinstance(payload, dict) or payload.get("code", 0) not in (0, "0", None):
+                    raise RuntimeError(f"BingX API error: {str(payload)[:300]}")
+                self.last_error = None
+                return payload.get("data", payload)
+        except Exception as exc:
+            self.last_error = str(exc)
+            raise
 
-    def status(self):
-        return {
-            "provider": "BingX public API",
-            "last_success": self.last_success,
-            "last_error": self.last_error,
-            "authenticated": False
-        }
+    async def ticker(self, symbol):
+        data = await self._get(BINGX_TICKER_PATH, {"symbol": symbol})
+        if isinstance(data, list): data = data[0] if data else {}
+        if not isinstance(data, dict): raise ValueError("Unexpected ticker response")
+        price = data.get("lastPrice", data.get("last", data.get("price")))
+        return {"last": float(price), "raw": data}
+
+    async def klines(self, symbol, interval="15m", limit=KLINE_LIMIT):
+        data = await self._get(BINGX_KLINE_PATH, {"symbol": symbol, "interval": interval, "limit": int(limit)})
+        if isinstance(data, dict): data = data.get("data", data.get("klines", []))
+        if not isinstance(data, list): raise ValueError("Unexpected kline response")
+        rows=[]
+        for item in data:
+            if isinstance(item, dict):
+                get=lambda *keys: next((item[k] for k in keys if k in item), None)
+                vals=[get("open","o"),get("high","h"),get("low","l"),get("close","c"),get("volume","v")]
+            elif isinstance(item, (list,tuple)) and len(item)>=6: vals=item[1:6]
+            else: continue
+            try: rows.append([float(x) for x in vals])
+            except (TypeError,ValueError): continue
+        return rows
