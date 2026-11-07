@@ -1,11 +1,15 @@
 
 """Advanced asynchronous orchestration for AI QUANT.
-Educational paper simulation only. No real order execution.
+
+Educational paper simulation only.
+No real order execution or private exchange endpoints.
 """
 
 import asyncio
+import inspect
 import logging
 import math
+
 from datetime import datetime, timezone
 
 import config
@@ -16,26 +20,39 @@ from ai_council import AICouncil
 from news_engine import NewsEngine
 from decision_engine import evaluate_setup
 from paper_trading import PaperTrader
+from telegram_bot import TelegramBot
 
-logger = logging.getLogger(__name__)
+
+logger = logging.getLogger("AI_QUANT.engine")
+
+
+# --------------------------------------------------
+# Configuration
+# --------------------------------------------------
 
 SYMBOLS = tuple(config.SYMBOLS)
 
-TIMEFRAMES = getattr(
-    config,
-    "TIMEFRAMES",
-    (getattr(config, "TIMEFRAME", "15m"),)
-)
-
-if isinstance(TIMEFRAMES, str):
-    TIMEFRAMES = (TIMEFRAMES,)
-
-TIMEFRAMES = tuple(TIMEFRAMES)
-
 REQUIRED_TIMEFRAMES = ("15m", "1h", "4h")
 
+_configured_timeframes = getattr(
+    config,
+    "TIMEFRAMES",
+    getattr(config, "TIMEFRAME", "15m")
+)
+
+if isinstance(_configured_timeframes, str):
+    _configured_timeframes = (_configured_timeframes,)
+
+# Always include all required analysis timeframes.
+TIMEFRAMES = tuple(
+    dict.fromkeys(
+        tuple(_configured_timeframes)
+        + REQUIRED_TIMEFRAMES
+    )
+)
+
 SCAN_INTERVAL_SECONDS = max(
-    1,
+    60,
     int(config.SCAN_INTERVAL_SECONDS)
 )
 
@@ -44,19 +61,36 @@ def utc_now():
     return datetime.now(timezone.utc).isoformat()
 
 
+# --------------------------------------------------
+# Trading engine
+# --------------------------------------------------
+
 class TradingEngine:
 
     def __init__(self, db):
+
         if db is None:
-            raise ValueError("Database instance is required")
+            raise ValueError(
+                "A valid Database instance is required"
+            )
 
         self.db = db
 
+        # Core components.
         self.market = BingXMarketData()
         self.ai = AICouncil()
         self.news = NewsEngine()
+
+        # Paper-only portfolio.
         self.paper = PaperTrader(db)
 
+        # Optional Telegram notifications.
+        self.telegram = TelegramBot(
+            db,
+            engine=self
+        )
+
+        # Runtime state.
         self.running = False
         self.task = None
 
@@ -64,72 +98,134 @@ class TradingEngine:
         self.last_error = None
         self.last_prices = {}
 
+        # Prevent overlapping scans and lifecycle operations.
         self.scan_lock = asyncio.Lock()
         self.lifecycle_lock = asyncio.Lock()
 
+    # --------------------------------------------------
+    # Logging
+    # --------------------------------------------------
+
     def _log_event(self, level, message):
+
         try:
             self.db.log_event(
                 level,
                 str(message)[:1000],
                 utc_now()
             )
+
         except Exception:
             logger.exception(
                 "Could not write database event"
             )
 
     def _set_error(self, message):
+
         self.last_error = str(message)[:1000]
-        logger.error("%s", self.last_error)
-        self._log_event("ERROR", self.last_error)
+
+        logger.error(
+            "%s",
+            self.last_error
+        )
+
+        self._log_event(
+            "ERROR",
+            self.last_error
+        )
+
+    # --------------------------------------------------
+    # Component lifecycle
+    # --------------------------------------------------
 
     async def start(self):
+
         async with self.lifecycle_lock:
 
             if self.running:
                 return
 
-            started = []
+            started_components = []
 
             try:
+
+                # Start essential components.
                 for component in (
                     self.market,
                     self.ai,
-                    self.news
+                    self.news,
                 ):
+
                     await component.start()
-                    started.append(component)
+
+                    started_components.append(
+                        component
+                    )
 
                 self.running = True
+
+                # Telegram is optional.
+                try:
+
+                    await self.telegram.start()
+
+                except Exception:
+
+                    logger.exception(
+                        "Telegram startup failed; "
+                        "engine will continue without Telegram"
+                    )
+
+                    self._log_event(
+                        "WARNING",
+                        "Telegram startup failed"
+                    )
 
                 self.task = asyncio.create_task(
                     self.run_loop(),
                     name="ai-quant-engine"
                 )
 
-                logger.info("AI QUANT engine started.")
+                logger.info(
+                    "AI QUANT engine started successfully."
+                )
+
+                self._log_event(
+                    "INFO",
+                    "AI QUANT engine started"
+                )
 
             except Exception:
+
                 self.running = False
 
-                for component in reversed(started):
+                # Clean up components that already started.
+                for component in reversed(
+                    started_components
+                ):
+
                     try:
                         await component.close()
+
                     except Exception:
                         logger.exception(
-                            "Startup cleanup failed"
+                            "Startup cleanup failed for %s",
+                            component.__class__.__name__
                         )
 
                 self.task = None
+
                 raise
 
     async def stop(self):
+
         async with self.lifecycle_lock:
 
             self.running = False
 
+            # Stop background scanning.
             if self.task is not None:
+
                 self.task.cancel()
 
                 await asyncio.gather(
@@ -139,43 +235,87 @@ class TradingEngine:
 
                 self.task = None
 
+            # Stop Telegram first.
+            try:
+
+                await self.telegram.close()
+
+            except Exception:
+
+                logger.exception(
+                    "Telegram shutdown failed"
+                )
+
+            # Stop core components.
             for component in (
-                self.market,
+                self.news,
                 self.ai,
-                self.news
+                self.market,
             ):
+
                 try:
+
                     await component.close()
+
                 except Exception:
+
                     logger.exception(
                         "Error closing %s",
                         component.__class__.__name__
                     )
 
-            logger.info("AI QUANT engine stopped.")
+            logger.info(
+                "AI QUANT engine stopped."
+            )
+
+            self._log_event(
+                "INFO",
+                "AI QUANT engine stopped"
+            )
+
+    # --------------------------------------------------
+    # Market data
+    # --------------------------------------------------
 
     async def _fetch_prices(self):
-        """Fetch valid ticker prices independently for each symbol."""
+        """Fetch and validate public ticker prices."""
 
         prices = {}
         errors = []
 
         for symbol in SYMBOLS:
+
             try:
-                ticker = await self.market.ticker(symbol)
+
+                ticker = await self.market.ticker(
+                    symbol
+                )
 
                 if not isinstance(ticker, dict):
-                    raise ValueError("Invalid ticker response")
+                    raise ValueError(
+                        "Invalid ticker response"
+                    )
 
-                price = float(ticker["last"])
+                price = float(
+                    ticker["last"]
+                )
 
-                if not math.isfinite(price) or price <= 0:
-                    raise ValueError("Invalid market price")
+                if (
+                    not math.isfinite(price)
+                    or price <= 0
+                ):
+                    raise ValueError(
+                        "Invalid market price"
+                    )
 
                 prices[symbol] = price
 
             except Exception as exc:
-                message = f"{symbol} ticker error: {exc}"
+
+                message = (
+                    f"{symbol} ticker error: {exc}"
+                )
+
                 errors.append(message)
 
                 logger.exception(
@@ -183,24 +323,59 @@ class TradingEngine:
                     symbol
                 )
 
-                self._log_event("ERROR", message)
+                self._log_event(
+                    "ERROR",
+                    message
+                )
 
         return prices, errors
 
-    async def _analyze_symbol(self, symbol, price, prices):
-        """Analyze one symbol and optionally open a paper position."""
+    # --------------------------------------------------
+    # News compatibility
+    # --------------------------------------------------
+
+    async def _check_news(self, symbol):
+        """Support synchronous or asynchronous news checks."""
+
+        result = self.news.blocks(symbol)
+
+        if inspect.isawaitable(result):
+            result = await result
+
+        return bool(result)
+
+    # --------------------------------------------------
+    # Symbol analysis
+    # --------------------------------------------------
+
+    async def _analyze_symbol(
+        self,
+        symbol,
+        price,
+        prices
+    ):
+        """Analyze multiple timeframes and evaluate a paper entry."""
 
         frames = {}
 
+        # Fetch and calculate all required timeframes.
         for timeframe in TIMEFRAMES:
+
             candles = await self.market.klines(
                 symbol,
                 timeframe
             )
 
-            frames[timeframe] = calculate_indicators(
+            indicators = calculate_indicators(
                 candles
             )
+
+            if not isinstance(indicators, dict):
+                raise ValueError(
+                    f"Invalid indicators for {timeframe}"
+                )
+
+            frames[timeframe] = indicators
 
         missing = [
             timeframe
@@ -209,25 +384,141 @@ class TradingEngine:
         ]
 
         if missing:
+
             raise ValueError(
-                "Required analysis timeframes missing: "
+                "Required timeframes missing: "
                 + ", ".join(missing)
             )
 
-        blocked = await self.news.blocks(symbol)
+        # Check news risk.
+        blocked = await self._check_news(
+            symbol
+        )
 
+        # Obtain AI council vote.
         ai = await self.ai.vote({
             "symbol": symbol,
-            "frames": frames
+            "frames": frames,
         })
 
+        if not isinstance(ai, dict):
+
+            ai = {
+                "vote": "UNAVAILABLE",
+                "agreement": 0.0,
+                "reason": "Invalid AI response",
+            }
+
+        vote = ai.get(
+            "vote",
+            "UNAVAILABLE"
+        )
+
+        agreement = ai.get(
+            "agreement",
+            0.0
+        )
+
+        try:
+            agreement = float(agreement)
+
+        except (TypeError, ValueError):
+            agreement = 0.0
+
+        if (
+            not math.isfinite(agreement)
+            or not 0 <= agreement <= 1
+        ):
+            agreement = 0.0
+
+        # Evaluate technical, AI and news conditions.
         decision = evaluate_setup(
             frames,
-            ai.get("vote", "UNAVAILABLE"),
-            ai.get("agreement", 0.0),
+            vote,
+            agreement,
             blocked
         )
 
+        if not isinstance(decision, dict):
+
+            raise ValueError(
+                "Decision engine returned an invalid result"
+            )
+
+        decision = dict(decision)
+
+        decision.setdefault(
+            "action",
+            "HOLD"
+        )
+
+        decision.setdefault(
+            "score",
+            0
+        )
+
+        decision.setdefault(
+            "reason",
+            "No valid setup"
+        )
+
+        decision["opened"] = False
+
+        # --------------------------------------------------
+        # Paper entry validation
+        # --------------------------------------------------
+
+        if decision["action"] == "PAPER_BUY_CANDIDATE":
+
+            atr = frames["15m"].get("atr")
+
+            valid_atr = (
+                isinstance(atr, (int, float))
+                and not isinstance(atr, bool)
+                and math.isfinite(atr)
+                and atr > 0
+            )
+
+            if not valid_atr:
+
+                decision["action"] = "HOLD"
+
+                decision["reason"] = (
+                    "Invalid ATR: paper entry rejected"
+                )
+
+                decision["entry_status"] = (
+                    "Rejected: invalid ATR"
+                )
+
+            else:
+
+                opened = self.paper.open_position(
+                    symbol,
+                    price,
+                    atr,
+                    prices=prices
+                )
+
+                decision["opened"] = bool(
+                    opened
+                )
+
+                if opened:
+
+                    decision["entry_status"] = (
+                        "Paper position opened"
+                    )
+
+                else:
+
+                    decision["entry_status"] = (
+                        "Rejected by portfolio risk, "
+                        "exposure, cash, duplicate-symbol "
+                        "or position limits"
+                    )
+
+        # Persist the final decision.
         self.db.record_decision(
             symbol,
             decision["action"],
@@ -236,145 +527,167 @@ class TradingEngine:
             utc_now()
         )
 
-        decision["opened"] = False
-
-        if decision["action"] == "PAPER_BUY_CANDIDATE":
-
-            atr = frames["15m"].get("atr")
-
-            if (
-                isinstance(atr, bool)
-                or not isinstance(atr, (int, float))
-                or not math.isfinite(atr)
-                or atr <= 0
-            ):
-                decision["reason"] = (
-                    "Invalid ATR: paper entry rejected"
-                )
-
-            else:
-                decision["opened"] = self.paper.open_position(
-                    symbol,
-                    price,
-                    atr,
-                    prices=prices
-                )
-
-                if not decision["opened"]:
-                    decision["entry_status"] = (
-                        "Rejected by portfolio risk, "
-                        "exposure, cash, or position limits"
-                    )
-                else:
-                    decision["entry_status"] = (
-                        "Paper position opened"
-                    )
-
         return {
             "symbol": symbol,
             **decision,
-            "ai": ai
+            "ai": ai,
         }
 
+    # --------------------------------------------------
+    # Complete scan
+    # --------------------------------------------------
+
     async def scan_once(self):
-        """Run one complete market-analysis and portfolio cycle."""
+        """Run one complete analysis and portfolio update cycle."""
 
         async with self.scan_lock:
 
             results = []
             errors = []
 
-            prices, market_errors = await self._fetch_prices()
-            errors.extend(market_errors)
+            prices, market_errors = (
+                await self._fetch_prices()
+            )
 
+            errors.extend(
+                market_errors
+            )
+
+            # Analyze every symbol with a valid ticker.
             for symbol in SYMBOLS:
 
                 if symbol not in prices:
                     continue
 
                 try:
+
                     result = await self._analyze_symbol(
                         symbol,
                         prices[symbol],
                         prices
                     )
 
-                    results.append(result)
+                    results.append(
+                        result
+                    )
 
                 except Exception as exc:
+
                     message = (
                         f"{symbol} analysis failed: {exc}"
                     )
 
-                    errors.append(message)
+                    errors.append(
+                        message
+                    )
 
                     logger.exception(
                         "Analysis failed for %s",
                         symbol
                     )
 
-                    self._log_event("ERROR", message)
+                    self._log_event(
+                        "ERROR",
+                        message
+                    )
 
-            self.last_prices = prices.copy()
-
-            # Always update existing paper positions when prices exist,
-            # even if another symbol's analysis failed.
+            # Preserve the latest valid ticker snapshot.
             if prices:
+
+                self.last_prices = prices.copy()
+
+            # Update open paper positions independently
+            # of whether analysis succeeded.
+            if prices:
+
                 try:
-                    closed = self.paper.update(prices)
+
+                    closed = self.paper.update(
+                        prices
+                    )
 
                     if closed:
+
                         logger.info(
                             "Paper positions closed: %s",
                             closed
                         )
 
+                        self._log_event(
+                            "INFO",
+                            f"Paper positions closed: {closed}"
+                        )
+
                 except Exception as exc:
+
                     message = (
                         f"Portfolio update failed: {exc}"
                     )
 
-                    errors.append(message)
+                    errors.append(
+                        message
+                    )
 
                     logger.exception(
                         "Portfolio update failed"
                     )
 
-                    self._log_event("ERROR", message)
+                    self._log_event(
+                        "ERROR",
+                        message
+                    )
 
             self.last_scan = utc_now()
 
             if errors:
-                self.last_error = " | ".join(errors)[:1000]
+
+                self.last_error = (
+                    " | ".join(errors)[:1000]
+                )
+
             elif not results:
-                self.last_error = "No successful analysis results"
+
+                self.last_error = (
+                    "No successful analysis results"
+                )
+
             else:
+
                 self.last_error = None
 
             return results
 
+    # --------------------------------------------------
+    # Background loop
+    # --------------------------------------------------
+
     async def run_loop(self):
-        """Background scanning loop."""
+        """Continuous background scanning."""
 
         while self.running:
 
             try:
+
                 await self.scan_once()
 
             except asyncio.CancelledError:
+
                 raise
 
             except Exception as exc:
+
                 self._set_error(
                     f"Engine loop error: {exc}"
                 )
 
             try:
+
                 await asyncio.sleep(
                     SCAN_INTERVAL_SECONDS
                 )
 
             except asyncio.CancelledError:
+
                 raise
 
 
