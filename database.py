@@ -1,53 +1,174 @@
 """SQLite persistence for a paper-only portfolio."""
+
 import sqlite3
 import threading
+import logging
 from pathlib import Path
+
 from config import DB_PATH, STARTING_BALANCE
 
+logger = logging.getLogger(__name__)
+
+
 class Database:
+
     def __init__(self, path=DB_PATH):
-        self.path = path
-        if path != ":memory:":
-            Path(path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
+
+        self.path = str(path)
         self.lock = threading.RLock()
-        self.conn = sqlite3.connect(path, check_same_thread=False, timeout=30)
+
+        if self.path != ":memory:":
+            db_path = Path(self.path).expanduser()
+
+            # Create database directory if missing.
+            db_path.parent.mkdir(
+                parents=True,
+                exist_ok=True
+            )
+
+            self.path = str(db_path)
+
+        self.conn = sqlite3.connect(
+            self.path,
+            check_same_thread=False,
+            timeout=30
+        )
+
         self.conn.row_factory = sqlite3.Row
+
         with self.lock:
             self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA foreign_keys=ON")
             self.conn.execute("PRAGMA busy_timeout=30000")
-            self._init_schema()
 
-    def _init_schema(self):
-        self.conn.executescript("""
-        CREATE TABLE IF NOT EXISTS account(id INTEGER PRIMARY KEY CHECK(id=1), cash REAL NOT NULL, realized_pnl REAL NOT NULL DEFAULT 0);
-        CREATE TABLE IF NOT EXISTS positions(id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL UNIQUE, qty REAL NOT NULL, entry REAL NOT NULL, stop REAL NOT NULL, target REAL NOT NULL, notional REAL NOT NULL, entry_fee REAL NOT NULL, opened_at TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS trades(id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, side TEXT NOT NULL, qty REAL NOT NULL, price REAL NOT NULL, pnl REAL NOT NULL, fee REAL NOT NULL, created_at TEXT NOT NULL, reason TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS decisions(id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, action TEXT NOT NULL, score REAL NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, level TEXT NOT NULL, message TEXT NOT NULL, created_at TEXT NOT NULL);
+            self._create_tables()
+
+    def _create_tables(self):
+
+        with self.conn:
+
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS account (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    balance REAL NOT NULL,
+                    equity REAL NOT NULL,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS positions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    entry_price REAL NOT NULL,
+                    quantity REAL NOT NULL,
+                    stop_loss REAL NOT NULL,
+                    take_profit REAL NOT NULL,
+                    status TEXT DEFAULT 'OPEN',
+                    opened_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    closed_at TEXT,
+                    exit_price REAL,
+                    pnl REAL DEFAULT 0
+                )
+            """)
+
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS trades (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    price REAL NOT NULL,
+                    quantity REAL NOT NULL,
+                    pnl REAL DEFAULT 0,
+                    fee REAL DEFAULT 0,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS decisions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    score REAL DEFAULT 0,
+                    reason TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            self.conn.execute("""
+                INSERT OR IGNORE INTO account
+                (id, balance, equity)
+                VALUES (1, ?, ?)
+            """, (
+                STARTING_BALANCE,
+                STARTING_BALANCE
+            ))
+
+    def execute(self, query, params=()):
+
+        with self.lock:
+            cursor = self.conn.execute(query, params)
+            self.conn.commit()
+            return cursor
+
+    def fetch_one(self, query, params=()):
+
+        with self.lock:
+            return self.conn.execute(
+                query, params
+            ).fetchone()
+
+    def fetch_all(self, query, params=()):
+
+        with self.lock:
+            return self.conn.execute(
+                query, params
+            ).fetchall()
+
+    def get_account(self):
+
+        return self.fetch_one(
+            "SELECT * FROM account WHERE id = 1"
+        )
+
+    def update_account(self, balance, equity):
+
+        self.execute("""
+            UPDATE account
+            SET balance = ?,
+                equity = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1
+        """, (balance, equity))
+
+    def get_positions(self):
+
+        return self.fetch_all("""
+            SELECT * FROM positions
+            WHERE status = 'OPEN'
+            ORDER BY opened_at DESC
         """)
-        self.conn.execute("INSERT OR IGNORE INTO account(id,cash,realized_pnl) VALUES(1,?,0)", (STARTING_BALANCE,))
-        self.conn.commit()
 
-    def account(self):
-        with self.lock:
-            return dict(self.conn.execute("SELECT * FROM account WHERE id=1").fetchone())
+    def get_trades(self, limit=100):
 
-    def positions(self):
-        with self.lock:
-            return [dict(r) for r in self.conn.execute("SELECT * FROM positions ORDER BY opened_at")]
+        return self.fetch_all("""
+            SELECT * FROM trades
+            ORDER BY id DESC
+            LIMIT ?
+        """, (limit,))
 
-    def recent(self, table, limit=50):
-        if table not in {"trades", "decisions", "events"}: raise ValueError("Unsupported table")
-        with self.lock:
-            return [dict(r) for r in self.conn.execute(f"SELECT * FROM {table} ORDER BY id DESC LIMIT ?", (int(limit),))]
+    def get_decisions(self, limit=100):
 
-    def record_decision(self, symbol, action, score, reason, now):
-        with self.lock:
-            self.conn.execute("INSERT INTO decisions(symbol,action,score,reason,created_at) VALUES(?,?,?,?,?)", (symbol,action,float(score),reason,now)); self.conn.commit()
-
-    def log_event(self, level, message, now):
-        with self.lock:
-            self.conn.execute("INSERT INTO events(level,message,created_at) VALUES(?,?,?)", (level,str(message)[:1000],now)); self.conn.commit()
+        return self.fetch_all("""
+            SELECT * FROM decisions
+            ORDER BY id DESC
+            LIMIT ?
+        """, (limit,))
 
     def close(self):
-        with self.lock: self.conn.close()
+
+        with self.lock:
+            if self.conn:
+                self.conn.close()
+                self.conn = None
