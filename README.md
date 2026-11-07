@@ -1,136 +1,157 @@
 
-# AI QUANT 3.1
+# AI QUANT 4.0
 
-AI QUANT is an AI-assisted cryptocurrency market analysis and paper trading system.
+AI QUANT is an advanced AI-assisted cryptocurrency market analysis and paper portfolio simulation system.
 
-It combines:
-- Market data from Binance.
-- Technical indicators.
-- AI-based decision analysis.
-- Market regime detection.
-- News analysis.
-- Simulated portfolio management.
-- Risk management.
-- SQLite database.
-- Gradio dashboard.
-- Optional Telegram monitoring.
+It combines public market data, technical indicators, multi-timeframe analysis, AI-assisted decision evaluation, news risk filtering, and simulated portfolio management.
 
-> IMPORTANT: AI QUANT operates in PAPER TRADING MODE ONLY.
-> It does not execute real cryptocurrency orders.
+> **PAPER TRADING ONLY**
+>
+> AI QUANT does not execute real cryptocurrency orders.
+> All positions, fees, profits, and losses are simulated.
 
 ---
 
-## 1. Project Features
+## 1. Features
 
 ### Market Analysis
-- Binance public market data.
+- Public BingX market data.
 - Multiple cryptocurrency pairs.
-- 15-minute timeframe.
+- Multi-timeframe analysis: 15m, 1h, and 4h.
 - Technical indicator calculations.
-- Market liquidity filtering.
+- Market price monitoring.
+- OHLCV data validation.
 
 ### AI Analysis
-- AI-assisted market evaluation.
-- BUY, SELL, HOLD decisions.
-- AI approval scoring.
-- News sentiment context.
+- Optional Hugging Face AI council.
+- Multiple AI model opinions.
+- BUY, SELL, and HOLD classification.
+- Minimum model agreement requirement.
+- Fail-closed behavior when AI is unavailable.
+- AI analysis is advisory and cannot bypass risk controls.
+
+### News Risk Filtering
+- RSS news monitoring.
+- Critical headline detection.
+- English and Arabic risk keywords.
+- News failures do not authorize new entries.
+- Headlines do not independently create trade signals.
 
 ### Risk Management
-- Simulated position sizing.
-- Stop-loss calculations.
-- Take-profit calculations.
+- Aggregate open-position risk limit.
+- Portfolio exposure limit.
+- Dynamic equity-based calculations.
+- Maximum open positions.
+- Simulated stop-loss and take-profit.
 - Trading fee simulation.
 - Slippage simulation.
-- Maximum open positions.
-- Portfolio exposure limits.
+
+The aggregate theoretical risk of simultaneously open positions is limited to 10% of current portfolio equity, subject to the configured risk calculations.
+
+This is a simulation control, not a guarantee of maximum real-world loss.
 
 ### Paper Trading
-- Simulated account balance.
-- Virtual positions.
-- Unrealized PnL.
-- Realized PnL.
+- Virtual starting balance.
+- Simulated position opening and closing.
+- Realized and unrealized PnL.
 - Simulated trade history.
 - SQLite persistence.
+- Duplicate position protection.
 
 ### Dashboard
-- Account overview.
-- Market regime.
-- Scanner statistics.
+- Portfolio status.
+- Current equity and cash.
+- Portfolio exposure.
+- Open-position risk.
+- Remaining risk budget.
+- Open simulated positions.
+- Recent simulated trades.
 - AI decision history.
-- Open paper positions.
-- Closed paper trades.
-- System events.
-- Manual market scanning.
-- Automatic dashboard refresh.
+- System status.
+
+The dashboard is read-only and does not execute trades.
 
 ### Telegram
 - Optional Telegram integration.
-- Status monitoring.
-- Manual scan command.
-- Position monitoring.
-- Administrator authorization.
+- Administrator-only commands.
+- `/status` portfolio monitoring.
+- `/positions` open-position monitoring.
+- Automatic simulated trade opening notifications.
+- Automatic simulated trade closing notifications.
+- Trade notifications include relevant entry, exit, quantity, fees, PnL, and closing reason details.
+
+Telegram failures must not stop the paper trading engine.
 
 ---
 
-## 2. Project Structure
+## 2. Technology Stack
+
+- Python 3.11
+- FastAPI
+- Uvicorn
+- Gradio
+- Pandas
+- NumPy
+- pandas-ta
+- aiohttp
+- SQLite
+- Hugging Face API (optional)
+- python-telegram-bot (optional)
+- Docker
+- Render
+
+---
+
+## 3. Project Structure
 
 ```text
 AI_QUANT/
 │
 ├── .github/
+│   └── workflows/
+│       └── ci.yml
 │
 ├── Dockerfile
-│
-├── README.md
-│
+├── render.yaml
 ├── requirements.txt
+├── README.md
+├── .env.example
 │
 ├── config.py
-│
 ├── main.py
-│
 ├── engine.py
-│
 ├── market_data.py
-│
 ├── technical_analysis.py
-│
 ├── decision_engine.py
-│
 ├── ai_council.py
-│
 ├── news_engine.py
-│
 ├── paper_trading.py
-│
 ├── database.py
-│
 ├── dashboard.py
-│
 ├── telegram_bot.py
 │
-└── ai_quant.db
+└── tests/
+    └── test_core.py
 ```
 
-The database file is created automatically when the application initializes, depending on the configured database path.
+The SQLite database is created automatically using `DB_PATH`.
+
+Do not commit database files containing private or personal information.
 
 ---
 
-## 3. Requirements
+## 4. Requirements
 
 - Python 3.11
-- Internet connection
-- Binance public market data access
-- Optional Hugging Face API token
-- Optional Telegram bot token
+- Internet access for public market data and optional external services.
+- Optional Hugging Face token.
+- Optional Telegram bot token and administrator ID.
 
 ---
 
-## 4. Installation
+## 5. Installation
 
 Clone or download the project.
-
-Open a terminal inside the project directory.
 
 Create a virtual environment:
 
@@ -153,40 +174,66 @@ source venv/bin/activate
 Install dependencies:
 
 ```bash
-pip install --upgrade pip
-pip install -r requirements.txt
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
 ---
 
-## 5. Configuration
+## 6. Configuration
 
-Configure the project using environment variables.
+Configure the application through environment variables.
 
 Important settings include:
 
-| Variable | Description |
+| Variable | Purpose |
 |---|---|
 | HOST | Application host |
-| PORT | Dashboard port |
-| DB_PATH | SQLite database path |
+| PORT | Application port |
+| DB_PATH | SQLite database location |
+| SYMBOLS | Cryptocurrency pairs |
+| TIMEFRAME | Primary analysis timeframe |
+| TIMEFRAMES | Analysis timeframes |
+| KLINE_LIMIT | Historical candle count |
+| SCAN_INTERVAL_SECONDS | Market scan interval |
+| MIN_SCORE_TO_ENTER | Minimum technical score |
 | HF_TOKEN | Optional Hugging Face token |
-| TELEGRAM_BOT_TOKEN | Optional Telegram token |
+| HF_MODELS | AI council models |
+| TELEGRAM_TOKEN | Optional Telegram bot token |
 | TELEGRAM_ADMIN_ID | Authorized Telegram administrator |
 
-Never publish API tokens or private credentials.
+Never publish tokens or private credentials.
 
-The application must remain configured with:
+### Paper trading mode
+
+The application must remain in paper trading mode.
 
 ```python
 PAPER_MODE = True
 ```
 
-Do not disable paper mode.
+The application must not contain or execute real exchange order operations.
 
 ---
 
-## 6. Running AI QUANT
+## 7. Risk Management
+
+AI QUANT uses two separate portfolio controls:
+
+- Aggregate theoretical open-position risk: maximum 10% of current portfolio equity.
+- Portfolio market exposure: maximum 10% of current portfolio equity.
+
+These limits are calculated separately.
+
+Portfolio equity is updated using available market prices and simulated realized and unrealized results.
+
+The risk budget changes as portfolio equity changes.
+
+A new position must be rejected if it would exceed the configured risk or exposure limits.
+
+---
+
+## 8. Running Locally
 
 Start the application:
 
@@ -197,72 +244,69 @@ python main.py
 Open the dashboard:
 
 ```text
-http://127.0.0.1:7860
+http://127.0.0.1:7860/ui/
 ```
 
-The port may differ if configured differently.
+Health endpoint:
+
+```text
+http://127.0.0.1:7860/health
+```
+
+The actual port depends on the `PORT` environment variable.
 
 ---
 
-## 7. Dashboard
+## 9. API Endpoints
 
-The dashboard provides:
+| Endpoint | Description |
+|---|---|
+| `/` | Application information |
+| `/health` | Health check |
+| `/api/health` | API health check |
+| `/status` | Portfolio status |
+| `/dashboard/status` | Dashboard portfolio data |
+| `/dashboard/positions` | Open simulated positions |
+| `/dashboard/trades` | Recent simulated trades |
+| `/dashboard/decisions` | AI decision history |
+| `/system/status` | Engine status |
+| `/ui/` | Gradio dashboard |
 
-- Available balance.
-- Total equity.
-- Realized PnL.
-- Unrealized PnL.
-- Reserved capital.
-- Win rate.
-- Open positions.
-- Scanner status.
-- Market regime.
-- AI decision history.
-- Closed paper trades.
-- System events.
+The dashboard API is read-only.
 
-Dashboard data refreshes automatically every 15 seconds.
-
----
-
-## 8. Paper Trading
-
-All trading operations are simulated.
-
-The system uses configured parameters for:
-
-- Initial balance.
-- Risk per trade.
-- Maximum allocation.
-- Trading fees.
-- Simulated slippage.
-- Stop-loss distance.
-- Take-profit distance.
-- Maximum open positions.
-
-Paper trading results are simulations, not predictions or guarantees of future performance.
+**Access warning:** The dashboard and data endpoints do not require login. Anyone with access to the service URL may be able to read the exposed data.
 
 ---
 
-## 9. Database
+## 10. Telegram Notifications
 
-AI QUANT uses SQLite to store:
+Telegram is optional.
 
-- Account information.
-- Open positions.
-- Closed trades.
-- Trading decisions.
-- System events.
+When configured, the administrator can receive automatic notifications after simulated trade events.
 
-Keep regular backups of the database.
+Opening notifications include:
+- Symbol.
+- Entry price.
+- Quantity.
+- Stop-loss.
+- Take-profit.
 
-Do not delete the database while the application is running.
+Closing notifications include:
+- Symbol.
+- Entry and exit prices.
+- Quantity.
+- Gross PnL.
+- Fees.
+- Net PnL.
+- Closing reason.
+
+Telegram notification failures must not interrupt market analysis or paper trading.
 
 ---
 
-## 10. Docker
+## 11. Docker
 
-Build the Docker image:
+Build the image:
 
 ```bash
 docker build -t ai-quant .
@@ -271,45 +315,93 @@ docker build -t ai-quant .
 Run the container:
 
 ```bash
-docker run -p 7860:7860 ai-quant
+docker run \
+  -p 7860:7860 \
+  -v ai-quant-data:/data \
+  -e DB_PATH=/data/ai_quant.db \
+  ai-quant
 ```
 
-For persistent database storage, configure a suitable mounted volume and DB_PATH.
+The mounted volume preserves the SQLite database across container recreation.
 
 ---
 
-## 11. Security
+## 12. Render Deployment
 
+The project includes a `render.yaml` configuration.
+
+Important deployment settings:
+
+- Docker runtime.
+- Health check: `/health`.
+- Database path: `/data/ai_quant.db`.
+- Persistent disk mounted at `/data`.
+
+A persistent disk must be available and successfully mounted for database persistence.
+
+Check Render's current plan and disk availability before deployment.
+
+---
+
+## 13. Testing
+
+Compile Python files:
+
+```bash
+python -m compileall -q .
+```
+
+Run unit tests:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+The CI workflow runs compilation and unit tests on GitHub Actions.
+
+A successful compilation does not prove that external APIs or every runtime integration is working.
+
+---
+
+## 14. Security
+
+- Keep paper trading mode enabled.
 - Never publish API tokens.
-- Do not expose the dashboard publicly without authentication and network restrictions.
+- Do not store private exchange credentials.
 - Restrict access to Telegram administration.
-- Protect database backups.
-- Keep PAPER_MODE enabled.
-
-The public health and status endpoints are intended for operational monitoring, not financial account access.
+- Protect database files and backups.
+- Remember that the dashboard is public unless access is restricted externally.
+- Use HTTPS for externally exposed services.
 
 ---
 
-## 12. Disclaimer
+## 15. Disclaimer
 
-AI QUANT is an educational software project for cryptocurrency market analysis and simulated trading.
+AI QUANT is an educational software project for market analysis and simulated portfolio management.
 
 It is not financial advice.
 
-Simulated performance does not guarantee real-world performance.
+AI-generated analysis and market data may be inaccurate, delayed, incomplete, or unavailable.
 
-Market data, AI analysis, and technical indicators may be inaccurate or unavailable.
+Paper trading results do not guarantee future performance.
 
-The software is designed to operate in paper trading mode only.
+The application is designed for paper simulation only.
 
 ---
 
-## 13. Project Version
+## 16. Project Information
 
 **Application:** AI QUANT
 
-**Version:** 3.1.0
+**Version:** 4.0.0
+
+**Analysis:** Advanced multi-timeframe
 
 **Mode:** PAPER TRADING ONLY
 
-**Python:** 3.11
+**Market Data:** BingX public endpoints
+
+**Database:** SQLite
+
+**Runtime:** Python 3.11
+```
