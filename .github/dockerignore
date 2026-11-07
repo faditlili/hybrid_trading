@@ -1,10 +1,56 @@
+Git
+
 .git
 .github
+
+Environment secrets
+
 .env
 .env.*
 !.env.example
-__pycache__
-*.pyc
+
+Python cache
+
+pycache/
+*.py[cod]
+*$py.class
+
+Virtual environments
+
+.venv/
+venv/
+env/
+
+Database files
+
 *.db
-.venv
-.pytest_cache
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+
+Test and tooling cache
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+Logs
+
+*.log
+logs/
+
+Build artifacts
+
+build/
+dist/
+*.egg-info/
+
+OS and editor files
+
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
