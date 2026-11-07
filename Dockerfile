@@ -1,27 +1,22 @@
 FROM python:3.11-slim
 
-# Python runtime settings
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
-
-# Application settings
 ENV HOST=0.0.0.0
-ENV PORT=0.0.0.0
+ENV PORT=7860
 ENV DB_PATH=/data/ai_quant.db
 
 WORKDIR /code
 
-# Install dependencies
-COPY requirements.txt .
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
+COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
-
-# Copy project files
 COPY . .
 
-# Create persistent data directory
-# Verify required project files
 RUN set -eux; \
     mkdir -p /data; \
     for file in \
@@ -41,15 +36,11 @@ RUN set -eux; \
         test -f "/code/$file"; \
     done
 
-# Create a non-root application user
 RUN groupadd --system app \
     && useradd --system --gid app --create-home app \
     && chown -R app:app /code /data
 
 USER app
-
-# Dashboard port
 EXPOSE 7860
 
-# Start AI QUANT
 CMD ["python", "-u", "main.py"]
