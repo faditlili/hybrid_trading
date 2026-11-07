@@ -1,8 +1,8 @@
 
-"""Dependency-light OHLCV validation and indicator calculations.
+"""OHLCV validation and technical indicator calculations.
 
 Calculates EMA, RSI, MACD, ATR and volume indicators.
-No trading or exchange order functionality.
+Analysis only. No trading or exchange order functionality.
 """
 
 import math
@@ -23,6 +23,18 @@ MIN_CANDLES = 200
 
 
 # --------------------------------------------------
+# Numeric validation
+# --------------------------------------------------
+
+def _finite_number(value):
+    """Return True only for finite numeric values."""
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+# --------------------------------------------------
 # OHLCV validation
 # --------------------------------------------------
 
@@ -31,17 +43,17 @@ def validate_ohlcv(rows):
 
     if isinstance(rows, pd.DataFrame):
         frame = rows.copy()
-
     else:
         try:
             frame = pd.DataFrame(rows)
         except Exception as exc:
-            raise ValueError(
-                "Invalid OHLCV input"
-            ) from exc
+            raise ValueError("Invalid OHLCV input") from exc
 
     if frame.empty:
         raise ValueError("No candle data provided")
+
+    if not frame.columns.is_unique:
+        raise ValueError("Duplicate OHLCV column names")
 
     missing = [
         column
@@ -56,47 +68,42 @@ def validate_ohlcv(rows):
 
     frame = frame.loc[:, REQUIRED].copy()
 
-    # Convert all OHLCV columns to numeric values.
-    frame = frame.apply(
-        pd.to_numeric,
-        errors="coerce",
-    )
-
-    # Remove invalid and infinite values.
-    frame = (
-        frame.replace(
-            [np.inf, -np.inf],
-            np.nan,
+    # Convert columns to numeric values.
+    for column in REQUIRED:
+        frame[column] = pd.to_numeric(
+            frame[column],
+            errors="coerce",
         )
-        .dropna()
-    )
 
-    # Prices must be positive; volume cannot be negative.
-    frame = frame[
+    # Remove NaN and infinite values.
+    frame = frame.replace(
+        [np.inf, -np.inf],
+        np.nan,
+    ).dropna(subset=list(REQUIRED))
+
+    # Prices must be positive.
+    # Volume may be zero, but never negative.
+    valid_values = (
         (frame["open"] > 0)
         & (frame["high"] > 0)
         & (frame["low"] > 0)
         & (frame["close"] > 0)
         & (frame["volume"] >= 0)
-    ]
+    )
+
+    frame = frame.loc[valid_values].copy()
 
     # Validate candle structure.
-    frame = frame[
-        (
-            frame["high"]
-            >= frame[
-                ["open", "close", "low"]
-            ].max(axis=1)
-        )
-        & (
-            frame["low"]
-            <= frame[
-                ["open", "close", "high"]
-            ].min(axis=1)
-        )
-    ]
+    valid_structure = (
+        (frame["high"] >= frame["open"])
+        & (frame["high"] >= frame["close"])
+        & (frame["high"] >= frame["low"])
+        & (frame["low"] <= frame["open"])
+        & (frame["low"] <= frame["close"])
+    )
 
-    # EMA200 requires at least 200 valid observations.
+    frame = frame.loc[valid_structure].copy()
+
     if len(frame) < MIN_CANDLES:
         raise ValueError(
             f"At least {MIN_CANDLES} valid candles are required; "
@@ -123,7 +130,7 @@ def calculate_indicators(rows):
     volume = frame["volume"]
 
     # --------------------------------------------------
-    # Exponential moving averages
+    # EMA
     # --------------------------------------------------
 
     def ema(period):
@@ -144,13 +151,8 @@ def calculate_indicators(rows):
 
     delta = close.diff()
 
-    gain = delta.clip(
-        lower=0,
-    )
-
-    loss = -delta.clip(
-        upper=0,
-    )
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
 
     average_gain = gain.ewm(
         alpha=1 / 14,
@@ -169,16 +171,15 @@ def calculate_indicators(rows):
         / average_loss.replace(0, np.nan)
     )
 
-    rsi = 100 - (
-        100 / (1 + rs)
-    )
+    rsi = 100 - (100 / (1 + rs))
 
-    # Handle zero-loss and zero-gain cases.
+    # Rising market with no losses.
     rsi = rsi.mask(
         (average_loss == 0) & (average_gain > 0),
         100.0,
     )
 
+    # Falling market with no gains.
     rsi = rsi.mask(
         (average_gain == 0) & (average_loss > 0),
         0.0,
@@ -215,7 +216,7 @@ def calculate_indicators(rows):
     ).mean()
 
     # --------------------------------------------------
-    # Average True Range
+    # ATR - Wilder smoothing
     # --------------------------------------------------
 
     previous_close = close.shift(1)
@@ -251,22 +252,10 @@ def calculate_indicators(rows):
     def value(series):
         result = series.iloc[-1]
 
-        if pd.isna(result):
+        if not _finite_number(result):
             return None
 
-        try:
-            result = float(result)
-        except (TypeError, ValueError, OverflowError):
-            return None
-
-        if not math.isfinite(result):
-            return None
-
-        return result
-
-    # --------------------------------------------------
-    # Final indicator validation
-    # --------------------------------------------------
+        return float(result)
 
     result = {
         "price": value(close),
@@ -286,16 +275,15 @@ def calculate_indicators(rows):
         "volume": value(volume),
         "volume_avg": value(volume_avg),
 
-        "high_20": value(
-            high.tail(20).max()
-        ),
-
-        "low_20": value(
-            low.tail(20).min()
-        ),
+        "high_20": value(high.tail(20).max()),
+        "low_20": value(low.tail(20).min()),
 
         "candles": len(frame),
     }
+
+    # --------------------------------------------------
+    # Final validation
+    # --------------------------------------------------
 
     required_indicators = (
         "price",
