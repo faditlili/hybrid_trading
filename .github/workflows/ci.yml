@@ -1,84 +1,26 @@
-
 name: AI QUANT CI
 
 on:
-  push:
-    branches: ["main"]
-  pull_request:
-    branches: ["main"]
-
-  workflow_dispatch:
+push:
+branches: [main]
+pull_request:
+branches: [main]
+workflow_dispatch:
 
 permissions:
-  contents: read
+contents: read
 
 jobs:
-  build:
-    name: Python 3.11 Checks
-    runs-on: ubuntu-latest
+test:
+runs-on: ubuntu-latest
+steps:
+- uses: actions/checkout@v4
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+  - uses: actions/setup-python@v5
+    with:
+      python-version: '3.11'
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-          cache-dependency-path: requirements.txt
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-
-      - name: Verify Python syntax
-        run: |
-          python -m compileall -q .
-
-      - name: Verify required project files
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          required_files = [
-              "config.py",
-              "database.py",
-              "market_data.py",
-              "technical_analysis.py",
-              "ai_council.py",
-              "news_engine.py",
-              "decision_engine.py",
-              "paper_trading.py",
-              "engine.py",
-              "dashboard.py",
-              "telegram_bot.py",
-              "main.py",
-          ]
-
-          missing = [
-              name for name in required_files
-              if not Path(name).is_file()
-          ]
-
-          if missing:
-              raise SystemExit(
-                  f"Missing required files: {missing}"
-              )
-
-          print("All required project files exist.")
-          PY
-
-      - name: Verify paper trading configuration
-        run: |
-          python - <<'PY'
-          from config import PAPER_MODE
-
-          if PAPER_MODE is not True:
-              raise SystemExit(
-                  "Safety check failed: PAPER_MODE must be True."
-              )
-
-          print("Paper trading mode is enabled.")
-          PY
+  - run: python -m pip install --upgrade pip
+  - run: pip install -r requirements.txt
+  - run: python -m compileall -q .
+  - run: python -m unittest discover -s tests -v
