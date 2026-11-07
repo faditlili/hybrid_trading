@@ -1,77 +1,27 @@
-"""Conservative signal scoring engine matrix handles entries."""
+"""Transparent deterministic scoring. AI output is advisory and cannot bypass gates."""
+def score_timeframe(x):
+    score=0; reasons=[]
+    if not x or any(x.get(k) is None for k in ("price","ema9","ema21","ema50","rsi","macd","macd_signal","atr")):
+        return 0,["incomplete indicators"]
+    if x["ema9"]>x["ema21"]: score+=20; reasons.append("short trend positive")
+    if x["ema21"]>x["ema50"]: score+=20; reasons.append("medium trend positive")
+    if 45<=x["rsi"]<=68: score+=15; reasons.append("momentum within preferred band")
+    if x["macd"]>x["macd_signal"]: score+=15; reasons.append("MACD positive")
+    if x.get("volume_avg") and x["volume"]>=x["volume_avg"]: score+=15; reasons.append("volume above average")
+    if x["price"]>x["ema50"]: score+=15; reasons.append("price above EMA50")
+    return min(score,100),reasons
 
-def calculate_technical_score(ind):
-    score = 0.0
-    reasons = []
-    # Evaluation gate for moving average crossovers
-    e9 = ind.get("ema9")
-    e21 = ind.get("ema21")
-    e50 = ind.get("ema50")
-    
-    if e9 and e21 and e9 > e21:
-        score += 20
-        reasons.append("EMA9 above EMA21")
-        
-    if e21 and e50 and e21 > e50:
-        score += 20
-        reasons.append("EMA21 above EMA50")
-    # Momentum and volatility matrix verification gates
-    rsi_val = ind.get("rsi", 50)
-    if 45 <= rsi_val <= 68:
-        score += 15
-        reasons.append(
-            "RSI momentum in range"
-        )
-        
-    if (
-        ind.get("macd", 0) 
-        > ind.get("macd_signal", 0)
-    ):
-        score += 15
-        reasons.append(
-            "MACD positive cross"
-        )
-    v_avg = ind.get("volume_avg", 0)
-    if v_avg > 0 and ind.get("volume", 0) >= v_avg:
-        score += 15
-        reasons.append(
-            "Volume above average"
-        )
-        
-    return {
-        "score": min(85, score), 
-        "reasons": reasons
-    }
-def evaluate_setup(
-    technical, ai_vote="UNAVAILABLE", 
-    agreement=0.0, min_score=72, 
-    min_agreement=.60
-):
-    score = float(technical.get("score", 0))
-    zscore = float(technical.get("zscore", 0))
-    
-    if not 0 <= score <= 85:
-        return {
-            "action": "HOLD", "score": 0, 
-            "reason": "Invalid score"
-        }
-    if zscore > 2.2:
-        return {
-            "action": "HOLD", "score": score, 
-            "reason": "Z-Score veto limit"
-        }
-    if (
-        ai_vote != "BUY" 
-        or agreement < min_agreement 
-        or score < min_score
-    ):
-        return {
-            "action": "HOLD", "score": score, 
-            "reason": "Consensus failed"
-        }
-        
-    return {
-        "action": "PAPER_BUY", 
-        "score": score + 15, 
-        "reason": "Signals synchronized"
-    }
+def evaluate_setup(frames, ai_vote="UNAVAILABLE", agreement=0.0, news_block=False):
+    if news_block: return {"action":"HOLD","score":0,"reason":"news safety gate"}
+    if not all(k in frames for k in ("15m","1h","4h")): return {"action":"HOLD","score":0,"reason":"missing timeframe"}
+    scores={k:score_timeframe(v)[0] for k,v in frames.items()}
+    if any(v==0 for v in scores.values()): return {"action":"HOLD","score":0,"reason":"invalid indicators"}
+    weighted=scores["15m"]*.5+scores["1h"]*.3+scores["4h"]*.2
+    aligned=(frames["1h"]["ema9"]>frames["1h"]["ema21"] and frames["4h"]["ema9"]>frames["4h"]["ema21"])
+    score=weighted+(10 if aligned else 0)
+    if ai_vote!="BUY" or agreement<.6:
+        return {"action":"HOLD","score":round(min(100,score),2),"reason":"AI consensus unavailable or insufficient"}
+    score=min(100,score+5)
+    if not aligned: return {"action":"HOLD","score":round(score,2),"reason":"higher-timeframe conflict"}
+    if score<75: return {"action":"HOLD","score":round(score,2),"reason":"score below threshold"}
+    return {"action":"PAPER_BUY_CANDIDATE","score":round(score,2),"reason":"quantitative and timeframe gates passed"}
