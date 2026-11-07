@@ -39,8 +39,15 @@ ALLOWED_PATHS = frozenset({
 
 def get_timeout():
     try:
-        value = float(os.getenv("DASHBOARD_HTTP_TIMEOUT", "8"))
-        return max(2.0, min(value, 30.0))
+        value = float(
+            os.getenv("DASHBOARD_HTTP_TIMEOUT", "8")
+        )
+
+        if not 0 < value <= 30:
+            return 8.0
+
+        return max(2.0, value)
+
     except (TypeError, ValueError):
         return 8.0
 
@@ -49,7 +56,7 @@ HTTP_TIMEOUT = get_timeout()
 
 
 def validate_api_url(url):
-    """Accept only valid HTTP or HTTPS backend URLs."""
+    """Validate backend URL."""
 
     try:
         parsed = urlsplit(url)
@@ -61,6 +68,8 @@ def validate_api_url(url):
             and parsed.password is None
             and not parsed.query
             and not parsed.fragment
+            and not parsed.path
+            and not parsed.port == 0
         )
 
     except (TypeError, ValueError):
@@ -91,6 +100,7 @@ def fetch(path):
 
     if path not in ALLOWED_PATHS:
         logger.warning("Dashboard rejected an unknown API path")
+
         return error_response(
             "Invalid dashboard endpoint.",
             str(path),
@@ -98,6 +108,7 @@ def fetch(path):
 
     if not API_URL_VALID:
         logger.error("Invalid dashboard API_URL configuration")
+
         return error_response(
             "Backend URL configuration is invalid.",
             path,
@@ -116,7 +127,20 @@ def fetch(path):
 
             response.raise_for_status()
 
-            content_length = response.headers.get("Content-Length")
+            content_type = response.headers.get(
+                "Content-Type", ""
+            ).lower()
+
+            if "application/json" not in content_type:
+                return error_response(
+                    "Backend did not return JSON.",
+                    path,
+                    response.status_code,
+                )
+
+            content_length = response.headers.get(
+                "Content-Length"
+            )
 
             if content_length:
                 try:
@@ -125,6 +149,7 @@ def fetch(path):
                             "Backend response is too large.",
                             path,
                         )
+
                 except ValueError:
                     return error_response(
                         "Invalid response size.",
@@ -155,9 +180,12 @@ def fetch(path):
             try:
                 return json.loads(raw_data)
 
-            except (json.JSONDecodeError, UnicodeDecodeError):
+            except (
+                json.JSONDecodeError,
+                UnicodeDecodeError,
+            ):
                 logger.warning(
-                    "Invalid JSON returned by dashboard endpoint: %s",
+                    "Invalid JSON returned by endpoint: %s",
                     path,
                 )
 
