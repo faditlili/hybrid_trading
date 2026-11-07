@@ -4,6 +4,40 @@ Permanently paper-simulation only.
 """
 
 import os
+import math
+
+
+def env_int(name, default, minimum=None, maximum=None):
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        raise ValueError(f"Invalid integer configuration: {name}")
+
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}")
+
+    if maximum is not None and value > maximum:
+        raise ValueError(f"{name} must be <= {maximum}")
+
+    return value
+
+
+def env_float(name, default, minimum=None, maximum=None):
+    try:
+        value = float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        raise ValueError(f"Invalid numeric configuration: {name}")
+
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be finite")
+
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}")
+
+    if maximum is not None and value > maximum:
+        raise ValueError(f"{name} must be <= {maximum}")
+
+    return value
 
 
 # Application
@@ -12,13 +46,14 @@ APP_VERSION = "4.0.0"
 PAPER_MODE = True
 
 HOST = os.getenv("HOST", "0.0.0.0")
-PORT = int(os.getenv("PORT", "7860"))
+PORT = env_int("PORT", 7860, 1, 65535)
 
 
 # Database
-# Configure DB_PATH=/data/ai_quant.db on Render
-# when a persistent disk is mounted at /data.
-DB_PATH = os.getenv("DB_PATH", "ai_quant.db")
+DB_PATH = os.getenv("DB_PATH", "ai_quant.db").strip()
+
+if not DB_PATH:
+    raise ValueError("DB_PATH cannot be empty")
 
 
 # BingX public market data only
@@ -43,36 +78,30 @@ SYMBOLS = tuple(
 
 TIMEFRAMES = ("15m", "1h", "4h")
 
-KLINE_LIMIT = max(
-    220,
-    min(500, int(os.getenv("KLINE_LIMIT", "300")))
+KLINE_LIMIT = env_int("KLINE_LIMIT", 300, 220, 500)
+
+SCAN_INTERVAL_SECONDS = env_int(
+    "SCAN_INTERVAL_SECONDS", 180, 60
 )
 
-SCAN_INTERVAL_SECONDS = max(
-    60,
-    int(os.getenv("SCAN_INTERVAL_SECONDS", "180"))
-)
-
-HTTP_TIMEOUT_SECONDS = max(
-    5,
-    int(os.getenv("HTTP_TIMEOUT_SECONDS", "15"))
+HTTP_TIMEOUT_SECONDS = env_int(
+    "HTTP_TIMEOUT_SECONDS", 15, 5
 )
 
 
 # Portfolio
-STARTING_BALANCE = float(
-    os.getenv("STARTING_BALANCE", "200")
+STARTING_BALANCE = env_float(
+    "STARTING_BALANCE", 200, 0.01
 )
 
-MAX_OPEN_POSITIONS = max(
-    1,
-    int(os.getenv("MAX_OPEN_POSITIONS", "3"))
+MAX_OPEN_POSITIONS = env_int(
+    "MAX_OPEN_POSITIONS", 3, 1
 )
 
-# Maximum aggregate open position value / equity
+# Aggregate open simulated exposure / current equity.
 PORTFOLIO_EXPOSURE_LIMIT = 0.10
 
-# Maximum planned loss at stop per new position / equity
+# Planned loss budget per new simulated position / current equity.
 PORTFOLIO_RISK_FRACTION = 0.10
 
 FEE_RATE = 0.001
@@ -92,7 +121,7 @@ HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
 HF_API_URL = os.getenv(
     "HF_API_URL",
     "https://router.huggingface.co/v1/chat/completions"
-)
+).strip()
 
 HF_MODELS = tuple(
     s.strip()
@@ -100,29 +129,22 @@ HF_MODELS = tuple(
     if s.strip()
 )
 
-AI_TIMEOUT_SECONDS = max(
-    5,
-    int(os.getenv("AI_TIMEOUT_SECONDS", "20"))
+AI_TIMEOUT_SECONDS = env_int(
+    "AI_TIMEOUT_SECONDS", 20, 5
 )
 
-AI_MIN_MODELS = max(
-    1,
-    int(os.getenv("AI_MIN_MODELS", "2"))
+AI_MIN_MODELS = env_int(
+    "AI_MIN_MODELS", 2, 1
 )
 
-AI_MIN_AGREEMENT = min(
-    1.0,
-    max(
-        0.0,
-        float(os.getenv("AI_MIN_AGREEMENT", "0.60"))
-    )
+AI_MIN_AGREEMENT = env_float(
+    "AI_MIN_AGREEMENT", 0.60, 0.0, 1.0
 )
 
 
 # News engine
-NEWS_REFRESH_SECONDS = max(
-    120,
-    int(os.getenv("NEWS_REFRESH_SECONDS", "600"))
+NEWS_REFRESH_SECONDS = env_int(
+    "NEWS_REFRESH_SECONDS", 600, 120
 )
 
 
@@ -141,16 +163,11 @@ DASHBOARD_REFRESH_SECONDS = 30
 
 
 # Configuration validation
-if STARTING_BALANCE <= 0:
-    raise ValueError(
-        "STARTING_BALANCE must be positive"
-    )
-
-if PORT <= 0 or PORT > 65535:
-    raise ValueError("Invalid PORT")
-
 if not SYMBOLS:
-    raise ValueError("At least one trading symbol is required")
+    raise ValueError("At least one market symbol is required")
+
+if len(set(SYMBOLS)) != len(SYMBOLS):
+    raise ValueError("Duplicate market symbols detected")
 
 if not 0 < PORTFOLIO_EXPOSURE_LIMIT <= 1:
     raise ValueError("Invalid portfolio exposure limit")
@@ -161,7 +178,7 @@ if not 0 < PORTFOLIO_RISK_FRACTION <= 1:
 if not 0 <= FEE_RATE < 1:
     raise ValueError("Invalid fee rate")
 
-if SLIPPAGE_BPS < 0:
+if SLIPPAGE_BPS < 0 or not math.isfinite(SLIPPAGE_BPS):
     raise ValueError("Invalid slippage")
 
 if STOP_ATR_MULTIPLIER <= 0:
@@ -170,5 +187,7 @@ if STOP_ATR_MULTIPLIER <= 0:
 if TARGET_R_MULTIPLIER <= 0:
     raise ValueError("Invalid target multiplier")
 
-if not 0 <= AI_MIN_AGREEMENT <= 1:
-    raise ValueError("Invalid AI agreement threshold")
+if AI_MIN_MODELS > len(HF_MODELS) and HF_MODELS:
+    raise ValueError(
+        "AI_MIN_MODELS cannot exceed the number of configured models"
+    )
