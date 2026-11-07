@@ -4,6 +4,7 @@
 No exchange order functionality exists here.
 All positions are simulated.
 Aggregate theoretical portfolio risk is capped at 10%.
+Provides detailed trade data for optional Telegram notifications.
 """
 
 import math
@@ -59,7 +60,7 @@ class PaperTrader:
     def _position_risk(self, position):
         """Estimate one open position's loss at its stop.
 
-        Includes its original entry fee and estimated exit
+        Includes original entry fee and estimated exit
         slippage and fee.
         """
 
@@ -205,6 +206,17 @@ class PaperTrader:
 
         return max(0.0, budget - aggregate_risk)
 
+    def get_position(self, symbol):
+        """Return one currently open simulated position."""
+
+        symbol = str(symbol).strip().upper()
+
+        for position in self.db.positions():
+            if position["symbol"] == symbol:
+                return dict(position)
+
+        return None
+
     # --------------------------------------------------
     # Open simulated position
     # --------------------------------------------------
@@ -241,6 +253,9 @@ class PaperTrader:
                 fill
                 + (fill - stop) * TARGET_R_MULTIPLIER
             )
+
+            if not math.isfinite(target) or target <= fill:
+                return False
 
             stop_fill = stop * (1 - SLIPPAGE_RATE)
 
@@ -321,8 +336,7 @@ class PaperTrader:
                         self.db.conn.rollback()
                         return False
 
-                    # Aggregate risk limit:
-                    # New position may use only the remaining budget.
+                    # Aggregate risk limit across all open positions.
                     risk_cap = (
                         equity * PORTFOLIO_RISK_FRACTION
                     )
@@ -405,6 +419,8 @@ class PaperTrader:
                         self.db.conn.rollback()
                         return False
 
+                    opened_at = self.now()
+
                     # Debit simulated cash.
                     self.db.conn.execute(
                         """
@@ -439,7 +455,7 @@ class PaperTrader:
                             target,
                             notional,
                             entry_fee,
-                            self.now(),
+                            opened_at,
                         ),
                     )
 
@@ -466,7 +482,7 @@ class PaperTrader:
                             fill,
                             0.0,
                             entry_fee,
-                            self.now(),
+                            opened_at,
                             "Aggregate portfolio risk-based paper entry",
                         ),
                     )
@@ -487,7 +503,12 @@ class PaperTrader:
     # --------------------------------------------------
 
     def update(self, prices):
-        """Update positions and simulate stop/target exits."""
+        """Update positions and simulate stop/target exits.
+
+        Returns detailed records only for successfully committed
+        simulated closures. These records can be used by the
+        engine to send optional Telegram notifications.
+        """
 
         prices = prices or {}
         closed = []
@@ -550,6 +571,8 @@ class PaperTrader:
                 pnl = gross - entry_fee - exit_fee
                 proceeds = fill * qty - exit_fee
 
+                closed_at = self.now()
+
                 with self.db.lock:
                     try:
                         self.db.conn.execute("BEGIN IMMEDIATE")
@@ -608,18 +631,28 @@ class PaperTrader:
                                 fill,
                                 pnl,
                                 exit_fee,
-                                self.now(),
+                                closed_at,
                                 reason,
                             ),
                         )
 
                         self.db.conn.commit()
 
+                        # Returned only after successful database commit.
                         closed.append({
+                            "position_id": position["id"],
                             "symbol": symbol,
-                            "pnl": pnl,
+                            "side": "PAPER_SELL",
+                            "qty": qty,
+                            "entry_price": entry,
                             "exit_price": fill,
+                            "gross_pnl": gross,
+                            "entry_fee": entry_fee,
+                            "exit_fee": exit_fee,
+                            "total_fees": entry_fee + exit_fee,
+                            "pnl": pnl,
                             "reason": reason,
+                            "closed_at": closed_at,
                         })
 
                     except Exception:
