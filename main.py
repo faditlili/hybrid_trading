@@ -8,8 +8,8 @@ import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 import config
 from config import APP_NAME, APP_VERSION, HOST, PORT
@@ -21,8 +21,15 @@ from engine import Engine
 # Logging
 # --------------------------------------------------
 
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+if LOG_LEVEL not in {
+    "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"
+}:
+    LOG_LEVEL = "INFO"
+
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    level=getattr(logging, LOG_LEVEL),
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 
@@ -131,11 +138,12 @@ def get_database(request: Request):
     return db
 
 
-def service_error(logger_message: str, exc: Exception):
-    logger.exception(
+def service_error(message: str, exc: Exception):
+    logger.error(
         "%s: %s",
-        logger_message,
-        exc,
+        message,
+        type(exc).__name__,
+        exc_info=True,
     )
 
     return JSONResponse(
@@ -172,8 +180,9 @@ async def health(request: Request):
         )
 
     try:
-        # Verify that SQLite is actually responding.
-        db.conn.execute("SELECT 1").fetchone()
+        # Use the database lock to avoid concurrent SQLite access.
+        with db.lock:
+            db.conn.execute("SELECT 1").fetchone()
 
     except Exception:
         logger.exception("Database health check failed.")
@@ -241,6 +250,8 @@ async def dashboard_status(request: Request):
             risk_budget - open_risk,
         )
 
+        positions = db.get_positions()
+
         return {
             "application": APP_NAME,
             "version": APP_VERSION,
@@ -259,7 +270,7 @@ async def dashboard_status(request: Request):
 
             "exposure_limit": config.PORTFOLIO_EXPOSURE_LIMIT,
             "max_open_positions": config.MAX_OPEN_POSITIONS,
-            "open_positions": len(db.positions()),
+            "open_positions": len(positions),
 
             "last_scan": engine.last_scan,
             "last_error": engine.last_error,
@@ -355,7 +366,7 @@ try:
     logger.info("Gradio dashboard mounted at /ui")
 
 except ImportError:
-    logger.exception(
+    logger.warning(
         "Gradio or dashboard dependency is unavailable. "
         "The API will remain operational."
     )
@@ -380,5 +391,5 @@ if __name__ == "__main__":
         port=PORT,
         reload=False,
         workers=1,
-        log_level=os.getenv("LOG_LEVEL", "info").lower(),
+        log_level=LOG_LEVEL.lower(),
     )
