@@ -43,7 +43,6 @@ _configured_timeframes = getattr(
 if isinstance(_configured_timeframes, str):
     _configured_timeframes = (_configured_timeframes,)
 
-# Always include all required analysis timeframes.
 TIMEFRAMES = tuple(
     dict.fromkeys(
         tuple(_configured_timeframes)
@@ -132,6 +131,109 @@ class TradingEngine:
         self._log_event(
             "ERROR",
             self.last_error
+        )
+
+    # --------------------------------------------------
+    # Telegram notifications
+    # --------------------------------------------------
+
+    async def _send_telegram_notification(
+        self,
+        method_name,
+        payload
+    ):
+        """Send an optional notification without interrupting the engine."""
+
+        if self.telegram is None:
+            return False
+
+        method = getattr(
+            self.telegram,
+            method_name,
+            None
+        )
+
+        if not callable(method):
+            logger.warning(
+                "Telegram method %s is unavailable",
+                method_name
+            )
+            return False
+
+        try:
+
+            result = method(payload)
+
+            if inspect.isawaitable(result):
+                await result
+
+            return True
+
+        except Exception:
+
+            logger.exception(
+                "Telegram notification failed: %s",
+                method_name
+            )
+
+            self._log_event(
+                "WARNING",
+                f"Telegram notification failed: {method_name}"
+            )
+
+            return False
+
+    async def _notify_trade_opened(self, symbol):
+        """Notify Telegram after a paper position has been saved."""
+
+        getter = getattr(
+            self.paper,
+            "get_position",
+            None
+        )
+
+        if not callable(getter):
+            logger.error(
+                "PaperTrader.get_position() is unavailable"
+            )
+            return False
+
+        try:
+            position = getter(symbol)
+
+        except Exception:
+
+            logger.exception(
+                "Could not retrieve opened position: %s",
+                symbol
+            )
+
+            return False
+
+        if not isinstance(position, dict):
+            logger.error(
+                "Opened position could not be retrieved: %s",
+                symbol
+            )
+            return False
+
+        return await self._send_telegram_notification(
+            "notify_trade_opened",
+            position
+        )
+
+    async def _notify_trade_closed(self, trade):
+        """Notify Telegram after a closed paper trade has been committed."""
+
+        if not isinstance(trade, dict):
+            logger.warning(
+                "Invalid closed trade notification payload"
+            )
+            return False
+
+        return await self._send_telegram_notification(
+            "notify_trade_closed",
+            trade
         )
 
     # --------------------------------------------------
@@ -510,6 +612,12 @@ class TradingEngine:
                         "Paper position opened"
                     )
 
+                    # The paper trader saves the position first.
+                    # Telegram notification happens only afterward.
+                    await self._notify_trade_opened(
+                        symbol
+                    )
+
                 else:
 
                     decision["entry_status"] = (
@@ -617,6 +725,14 @@ class TradingEngine:
                             "INFO",
                             f"Paper positions closed: {closed}"
                         )
+
+                        # update() returns closed trades only
+                        # after their database transaction commits.
+                        for trade in closed:
+
+                            await self._notify_trade_closed(
+                                trade
+                            )
 
                 except Exception as exc:
 
