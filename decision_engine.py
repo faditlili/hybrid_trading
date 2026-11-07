@@ -23,6 +23,10 @@ REQUIRED_INDICATORS = (
 )
 
 
+# --------------------------------------------------
+# Validation helpers
+# --------------------------------------------------
+
 def valid_number(value):
     """Return True only for finite numeric values."""
 
@@ -36,23 +40,53 @@ def valid_number(value):
         return False
 
 
+def validate_timeframe(data):
+    """Validate required indicators and return an error or None."""
+
+    if not isinstance(data, dict):
+        return "invalid timeframe data"
+
+    for key in REQUIRED_INDICATORS:
+
+        if not valid_number(data.get(key)):
+            return f"invalid or missing indicator: {key}"
+
+    price = float(data["price"])
+    ema9 = float(data["ema9"])
+    ema21 = float(data["ema21"])
+    ema50 = float(data["ema50"])
+    rsi = float(data["rsi"])
+    atr = float(data["atr"])
+
+    if price <= 0:
+        return "invalid price"
+
+    if atr <= 0:
+        return "invalid ATR"
+
+    if min(ema9, ema21, ema50) <= 0:
+        return "invalid EMA values"
+
+    if not 0 <= rsi <= 100:
+        return "RSI outside valid range"
+
+    return None
+
+
+# --------------------------------------------------
+# Timeframe scoring
+# --------------------------------------------------
+
 def score_timeframe(data):
     """Calculate a deterministic score for one timeframe."""
 
     score = 0
     reasons = []
 
-    if not isinstance(data, dict):
-        return 0, ["invalid timeframe data"]
+    validation_error = validate_timeframe(data)
 
-    # Validate required indicators.
-    for key in REQUIRED_INDICATORS:
-
-        if not valid_number(data.get(key)):
-
-            return 0, [
-                f"invalid or missing indicator: {key}"
-            ]
+    if validation_error:
+        return 0, [validation_error]
 
     price = float(data["price"])
     ema9 = float(data["ema9"])
@@ -61,33 +95,19 @@ def score_timeframe(data):
     rsi = float(data["rsi"])
     macd = float(data["macd"])
     macd_signal = float(data["macd_signal"])
-    atr = float(data["atr"])
-
-    # Validate market values.
-    if price <= 0 or atr <= 0:
-        return 0, ["invalid price or ATR"]
-
-    if min(ema9, ema21, ema50) <= 0:
-        return 0, ["invalid EMA values"]
-
-    if not 0 <= rsi <= 100:
-        return 0, ["RSI outside valid range"]
 
     # Short-term trend.
     if ema9 > ema21:
-
         score += 20
         reasons.append("short trend positive")
 
     # Medium-term trend.
     if ema21 > ema50:
-
         score += 20
         reasons.append("medium trend positive")
 
     # Momentum.
     if 45 <= rsi <= 68:
-
         score += 15
         reasons.append(
             "momentum within preferred band"
@@ -95,7 +115,6 @@ def score_timeframe(data):
 
     # MACD confirmation.
     if macd > macd_signal:
-
         score += 15
         reasons.append("MACD positive")
 
@@ -110,18 +129,20 @@ def score_timeframe(data):
         and float(volume_avg) > 0
         and float(volume) >= float(volume_avg)
     ):
-
         score += 15
         reasons.append("volume above average")
 
     # Price position.
     if price > ema50:
-
         score += 15
         reasons.append("price above EMA50")
 
     return min(score, 100), reasons
 
+
+# --------------------------------------------------
+# Setup evaluation
+# --------------------------------------------------
 
 def evaluate_setup(
     frames,
@@ -133,10 +154,18 @@ def evaluate_setup(
 
     def hold(score, reason, details=None):
 
+        if not valid_number(score):
+            score = 0
+
+        score = max(
+            0.0,
+            min(100.0, float(score))
+        )
+
         result = {
             "action": "HOLD",
-            "score": round(float(score), 2),
-            "reason": reason,
+            "score": round(score, 2),
+            "reason": str(reason),
         }
 
         if details is not None:
@@ -180,7 +209,7 @@ def evaluate_setup(
         )
 
     # --------------------------------------------------
-    # Score each timeframe
+    # Validate and score all timeframes
     # --------------------------------------------------
 
     scores = {}
@@ -188,9 +217,25 @@ def evaluate_setup(
 
     for timeframe in TIMEFRAMES:
 
-        score, reasons = score_timeframe(
-            frames[timeframe]
-        )
+        data = frames[timeframe]
+
+        validation_error = validate_timeframe(data)
+
+        if validation_error:
+
+            details[timeframe] = {
+                "score": 0,
+                "reasons": [validation_error],
+            }
+
+            return hold(
+                0,
+                f"invalid indicators: {timeframe}: "
+                f"{validation_error}",
+                details
+            )
+
+        score, reasons = score_timeframe(data)
 
         scores[timeframe] = score
 
@@ -198,18 +243,6 @@ def evaluate_setup(
             "score": score,
             "reasons": reasons,
         }
-
-        # Do not treat score zero as invalid.
-        # Indicator validity is checked separately above.
-        if len(reasons) == 1 and reasons[0].startswith(
-            ("invalid",)
-        ):
-
-            return hold(
-                0,
-                f"invalid indicators: {timeframe}",
-                details
-            )
 
     # --------------------------------------------------
     # Weighted multi-timeframe score
@@ -226,46 +259,50 @@ def evaluate_setup(
     # --------------------------------------------------
 
     aligned = (
-        frames["1h"]["ema9"] > frames["1h"]["ema21"]
+        float(frames["1h"]["ema9"])
+        > float(frames["1h"]["ema21"])
         and
-        frames["4h"]["ema9"] > frames["4h"]["ema21"]
+        float(frames["4h"]["ema9"])
+        > float(frames["4h"]["ema21"])
     )
 
     score = weighted_score
 
     if aligned:
-
         score += 10
 
     # --------------------------------------------------
     # Validate AI agreement
     # --------------------------------------------------
 
-    if isinstance(agreement, bool):
+    if isinstance(agreement, bool) or not valid_number(agreement):
 
-        agreement = 0.0
+        return hold(
+            score,
+            "invalid AI agreement value",
+            details
+        )
 
-    else:
+    agreement = float(agreement)
 
-        try:
-            agreement = float(agreement)
+    if not 0 <= agreement <= 1:
 
-        except (TypeError, ValueError, OverflowError):
-            agreement = 0.0
+        return hold(
+            score,
+            "AI agreement outside valid range",
+            details
+        )
 
-    if not math.isfinite(agreement):
-
-        agreement = 0.0
-
-    agreement = max(
-        0.0,
-        min(1.0, agreement)
+    normalized_vote = (
+        ai_vote.strip().upper()
+        if isinstance(ai_vote, str)
+        else "UNAVAILABLE"
     )
 
     # AI cannot override technical conditions.
     if (
-        ai_vote != "BUY"
-        or agreement < 0.60
+        normalized_vote != "BUY"
+        or agreement < config.AI_MIN_AGREEMENT
     ):
 
         return hold(
@@ -318,7 +355,7 @@ def evaluate_setup(
         )
 
     score = min(
-        100,
+        100.0,
         score
     )
 
