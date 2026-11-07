@@ -4,8 +4,10 @@ No username/password prompt.
 Paper simulation only. No real exchange orders.
 """
 
+import json
 import logging
 import os
+from urllib.parse import urlsplit
 
 import gradio as gr
 import requests
@@ -23,45 +25,157 @@ API_PORT = os.getenv("PORT", "7860")
 API_URL = os.getenv(
     "API_URL",
     f"http://127.0.0.1:{API_PORT}",
-).rstrip("/")
+).strip().rstrip("/")
 
-try:
-    HTTP_TIMEOUT = max(
-        2,
-        int(os.getenv("DASHBOARD_HTTP_TIMEOUT", "8"))
-    )
-except (TypeError, ValueError):
-    HTTP_TIMEOUT = 8
+MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+
+ALLOWED_PATHS = frozenset({
+    "/dashboard/status",
+    "/dashboard/positions",
+    "/dashboard/trades",
+    "/dashboard/decisions",
+})
+
+
+def get_timeout():
+    try:
+        value = float(os.getenv("DASHBOARD_HTTP_TIMEOUT", "8"))
+        return max(2.0, min(value, 30.0))
+    except (TypeError, ValueError):
+        return 8.0
+
+
+HTTP_TIMEOUT = get_timeout()
+
+
+def validate_api_url(url):
+    """Accept only valid HTTP or HTTPS backend URLs."""
+
+    try:
+        parsed = urlsplit(url)
+
+        return (
+            parsed.scheme in {"http", "https"}
+            and bool(parsed.hostname)
+            and parsed.username is None
+            and parsed.password is None
+            and not parsed.query
+            and not parsed.fragment
+        )
+
+    except (TypeError, ValueError):
+        return False
+
+
+API_URL_VALID = validate_api_url(API_URL)
 
 
 # --------------------------------------------------
 # API client
 # --------------------------------------------------
 
+def error_response(message, path, status_code=None):
+    result = {
+        "dashboard_error": message,
+        "endpoint": path,
+    }
+
+    if status_code is not None:
+        result["status_code"] = status_code
+
+    return result
+
+
 def fetch(path):
-    """Fetch read-only data from the local FastAPI backend."""
+    """Fetch one approved read-only endpoint."""
 
-    if not path.startswith("/"):
-        raise ValueError("API path must start with '/'")
-
-    try:
-        response = requests.get(
-            f"{API_URL}{path}",
-            timeout=HTTP_TIMEOUT,
-            headers={"Accept": "application/json"},
+    if path not in ALLOWED_PATHS:
+        logger.warning("Dashboard rejected an unknown API path")
+        return error_response(
+            "Invalid dashboard endpoint.",
+            str(path),
         )
 
-        response.raise_for_status()
+    if not API_URL_VALID:
+        logger.error("Invalid dashboard API_URL configuration")
+        return error_response(
+            "Backend URL configuration is invalid.",
+            path,
+        )
 
-        return response.json()
+    try:
+        with requests.get(
+            f"{API_URL}{path}",
+            timeout=(3.0, HTTP_TIMEOUT),
+            headers={
+                "Accept": "application/json",
+            },
+            stream=True,
+            allow_redirects=False,
+        ) as response:
+
+            response.raise_for_status()
+
+            content_length = response.headers.get("Content-Length")
+
+            if content_length:
+                try:
+                    if int(content_length) > MAX_RESPONSE_BYTES:
+                        return error_response(
+                            "Backend response is too large.",
+                            path,
+                        )
+                except ValueError:
+                    return error_response(
+                        "Invalid response size.",
+                        path,
+                    )
+
+            chunks = []
+            total_size = 0
+
+            for chunk in response.iter_content(
+                chunk_size=16 * 1024
+            ):
+                if not chunk:
+                    continue
+
+                total_size += len(chunk)
+
+                if total_size > MAX_RESPONSE_BYTES:
+                    return error_response(
+                        "Backend response is too large.",
+                        path,
+                    )
+
+                chunks.append(chunk)
+
+            raw_data = b"".join(chunks)
+
+            try:
+                return json.loads(raw_data)
+
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                logger.warning(
+                    "Invalid JSON returned by dashboard endpoint: %s",
+                    path,
+                )
+
+                return error_response(
+                    "Backend returned invalid JSON.",
+                    path,
+                )
 
     except requests.Timeout:
-        logger.warning("Dashboard request timed out: %s", path)
+        logger.warning(
+            "Dashboard request timed out: %s",
+            path,
+        )
 
-        return {
-            "dashboard_error": "Request timed out.",
-            "endpoint": path,
-        }
+        return error_response(
+            "Request timed out.",
+            path,
+        )
 
     except requests.HTTPError as exc:
         status_code = (
@@ -71,38 +185,38 @@ def fetch(path):
         )
 
         logger.warning(
-            "Dashboard HTTP error for %s: status=%s",
+            "Dashboard HTTP error: endpoint=%s status=%s",
             path,
             status_code,
         )
 
-        return {
-            "dashboard_error": "Backend returned an HTTP error.",
-            "status_code": status_code,
-            "endpoint": path,
-        }
+        return error_response(
+            "Backend returned an HTTP error.",
+            path,
+            status_code,
+        )
 
     except requests.RequestException:
-        logger.exception(
-            "Dashboard connection failed for %s",
+        logger.warning(
+            "Dashboard connection failed: %s",
             path,
         )
 
-        return {
-            "dashboard_error": "Unable to connect to the backend.",
-            "endpoint": path,
-        }
-
-    except ValueError:
-        logger.exception(
-            "Invalid JSON response from %s",
+        return error_response(
+            "Unable to connect to the backend.",
             path,
         )
 
-        return {
-            "dashboard_error": "Backend returned invalid JSON.",
-            "endpoint": path,
-        }
+    except Exception:
+        logger.exception(
+            "Unexpected dashboard error: %s",
+            path,
+        )
+
+        return error_response(
+            "Unexpected dashboard error.",
+            path,
+        )
 
 
 # --------------------------------------------------
@@ -142,6 +256,8 @@ def build_dashboard():
             </span>
 
             This dashboard is read-only.
+
+            Dashboard data is visible to anyone who can access this page.
             """
         )
 
