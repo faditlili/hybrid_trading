@@ -132,16 +132,23 @@ def get_database(request: Request):
 
 
 def service_error(logger_message: str, exc: Exception):
-    logger.exception("%s: %s", logger_message, exc)
+    logger.exception(
+        "%s: %s",
+        logger_message,
+        exc,
+    )
 
     return JSONResponse(
         status_code=503,
-        content={"error": "Service temporarily unavailable"},
+        content={
+            "status": "error",
+            "error": "Service temporarily unavailable",
+        },
     )
 
 
 # --------------------------------------------------
-# Health check - Render
+# Health check
 # --------------------------------------------------
 
 @app.get("/health")
@@ -155,14 +162,27 @@ async def health(request: Request):
             content={"status": "starting"},
         )
 
-    is_running = bool(getattr(engine, "running", False))
-
-    if not is_running:
+    if not bool(getattr(engine, "running", False)):
         return JSONResponse(
             status_code=503,
             content={
                 "status": "degraded",
                 "engine_running": False,
+            },
+        )
+
+    try:
+        # Verify that SQLite is actually responding.
+        db.conn.execute("SELECT 1").fetchone()
+
+    except Exception:
+        logger.exception("Database health check failed.")
+
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "degraded",
+                "database": "unavailable",
             },
         )
 
@@ -214,6 +234,12 @@ async def dashboard_status(request: Request):
         equity = engine.paper.equity(prices)
         exposure = engine.paper.exposure(prices)
         risk_budget = engine.paper.risk_budget(prices)
+        open_risk = engine.paper.total_open_risk()
+
+        remaining_risk = max(
+            0.0,
+            risk_budget - open_risk,
+        )
 
         return {
             "application": APP_NAME,
@@ -228,6 +254,8 @@ async def dashboard_status(request: Request):
 
             "risk_fraction": config.PORTFOLIO_RISK_FRACTION,
             "risk_budget": risk_budget,
+            "open_risk": open_risk,
+            "remaining_risk": remaining_risk,
 
             "exposure_limit": config.PORTFOLIO_EXPOSURE_LIMIT,
             "max_open_positions": config.MAX_OPEN_POSITIONS,
@@ -251,6 +279,7 @@ async def dashboard_status(request: Request):
 async def dashboard_positions(request: Request):
     try:
         db = get_database(request)
+
         return db.get_positions()
 
     except Exception as exc:
@@ -265,6 +294,7 @@ async def dashboard_positions(request: Request):
 async def dashboard_trades(request: Request):
     try:
         db = get_database(request)
+
         return db.get_trades(100)
 
     except Exception as exc:
@@ -279,6 +309,7 @@ async def dashboard_trades(request: Request):
 async def dashboard_decisions(request: Request):
     try:
         db = get_database(request)
+
         return db.get_decisions(100)
 
     except Exception as exc:
