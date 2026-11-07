@@ -1,45 +1,39 @@
+
 FROM python:3.11-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1 
-PYTHONUNBUFFERED=1 
-PIP_NO_CACHE_DIR=1 
-PIP_DISABLE_PIP_VERSION_CHECK=1 
-HOST=0.0.0.0 
-PORT=7860 
-DB_PATH=/data/ai_quant.db
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HOST=0.0.0.0 \
+    PORT=7860
 
-WORKDIR /app
+WORKDIR /code
 
-System build dependencies
+# Install system dependencies
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       build-essential \
+       gcc \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN apt-get update 
-&& apt-get install -y --no-install-recommends 
-build-essential 
-&& rm -rf /var/lib/apt/lists/*
-
-Upgrade Python packaging tools
-
-RUN python -m pip install --upgrade pip setuptools wheel
-
-Install application dependencies
-
+# Copy dependency definitions
 COPY requirements.txt .
 
-RUN python -m pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies
+RUN python -m pip install --upgrade pip \
+    && python -m pip install -r requirements.txt
 
-Copy application files
-
+# Copy application source
 COPY . .
 
-Create non-root application user
-
-RUN groupadd --system app 
-&& useradd --system --gid app --home-dir /app app 
-&& mkdir -p /data 
-&& chown -R app:app /app /data
+# Create persistent data directory
+RUN mkdir -p /data \
+    && useradd --create-home --uid 10001 app \
+    && chown -R app:app /code /data
 
 USER app
 
 EXPOSE 7860
 
-CMD ["sh", "-c", "uvicorn main:app --host ${HOST:-0.0.0.0} --port ${PORT:-7860} --workers 1"]
+# Start FastAPI application
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-7860}"]
