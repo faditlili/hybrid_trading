@@ -1,8 +1,7 @@
-# AI QUANT - Python dependencies
-
 aiohttp>=3.9,<4
+pandas>=2.0,<4
+pandas_ta>=0.3.14b
 fastapi>=0.110,<1
 uvicorn[standard]>=0.27,<1
-gradio>=4.44,<6
+defusedxml>=0.7,<1
 python-telegram-bot>=21,<23
-pandas>=2.0,<4
